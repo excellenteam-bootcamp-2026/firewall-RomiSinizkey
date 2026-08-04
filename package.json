@@ -1,0 +1,22 @@
+{
+  "name": "firewall-orchestrator",
+  "version": "1.0.0",
+  "description": "NodeJS orchestrator API for managing firewall rules (ips, domains, ports)",
+  "main": "dist/infrastructure/http/server.js",
+  "scripts": {
+    "dev": "ts-node-dev --respawn --transpile-only src/infrastructure/http/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/infrastructure/http/server.js",
+    "lint": "tsc --noEmit"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "express": "^5.2.1"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.1.2",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.9.3"
+  }
+}
