@@ -4,7 +4,7 @@ import { ValidationError } from "../errors/AppError";
 const IPV4_REGEX =
   /^(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)){3}$/;
 
-const DOMAIN_REGEX = /^(?!-)[A-Za-z0-9-]{1,63}(?<!-)(\.[A-Za-z0-9-]{1,63})+$/;
+const DOMAIN_LABEL_REGEX = /^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/;
 
 export function assertValidMode(mode: unknown): asserts mode is RuleMode {
   if (mode !== "blacklist" && mode !== "whitelist") {
@@ -28,7 +28,15 @@ export function assertValidIps(values: unknown[]): asserts values is string[] {
 
 export function assertValidDomains(values: unknown[]): asserts values is string[] {
   for (const value of values) {
-    if (typeof value !== "string" || value.includes("/") || value.includes(":") || !DOMAIN_REGEX.test(value)) {
+    const labels = typeof value === "string" ? value.split(".") : [];
+    const isValid =
+      typeof value === "string" &&
+      !value.includes("/") &&
+      !value.includes(":") &&
+      labels.length >= 2 &&
+      labels.every((label) => DOMAIN_LABEL_REGEX.test(label));
+
+    if (!isValid) {
       throw new ValidationError(
         "INVALID_DOMAIN",
         `"${value}" is not a valid domain. Domains must not include protocol, path, or port.`

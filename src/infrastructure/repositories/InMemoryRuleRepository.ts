@@ -13,10 +13,14 @@ export class InMemoryRuleRepository implements RuleRepository {
 
   removeByIds(ids: number[]): { removed: FirewallRule[]; missingIds: number[] } {
     const idSet = new Set(ids);
-    const removed = this.rules.filter((rule) => idSet.has(rule.id));
-    const foundIds = new Set(removed.map((rule) => rule.id));
-    const missingIds = ids.filter((id) => !foundIds.has(id));
+    const existingIds = new Set(this.rules.map((rule) => rule.id));
+    const missingIds = ids.filter((id) => !existingIds.has(id));
 
+    if (missingIds.length > 0) {
+      return { removed: [], missingIds };
+    }
+
+    const removed = this.rules.filter((rule) => idSet.has(rule.id));
     this.rules = this.rules.filter((rule) => !idSet.has(rule.id));
 
     return { removed, missingIds };
@@ -28,17 +32,20 @@ export class InMemoryRuleRepository implements RuleRepository {
 
   updateStatus(ids: number[], active: boolean): { updated: FirewallRule[]; missingIds: number[] } {
     const idSet = new Set(ids);
-    const updated: FirewallRule[] = [];
+    const existingIds = new Set(this.rules.map((rule) => rule.id));
+    const missingIds = ids.filter((id) => !existingIds.has(id));
 
+    if (missingIds.length > 0) {
+      return { updated: [], missingIds };
+    }
+
+    const updated: FirewallRule[] = [];
     for (const rule of this.rules) {
       if (idSet.has(rule.id)) {
         rule.active = active;
         updated.push(rule);
       }
     }
-
-    const foundIds = new Set(updated.map((rule) => rule.id));
-    const missingIds = ids.filter((id) => !foundIds.has(id));
 
     return { updated, missingIds };
   }
