@@ -3,6 +3,7 @@
 NodeJS/Express/TypeScript orchestrator API for managing firewall rules (IPs, domains, ports),
 structured with Hexagonal Architecture.
 
+
 ## Structure
 
 - `src/domain` — entities and ports (framework-agnostic core).
