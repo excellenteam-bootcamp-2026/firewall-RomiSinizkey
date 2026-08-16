@@ -1,4 +1,5 @@
 import "dotenv/config";
+import "../../main/Logger";
 import { createApp } from "./app";
 import { InMemoryRuleRepository } from "../repositories/InMemoryRuleRepository";
 import { config } from "../../main/env";
