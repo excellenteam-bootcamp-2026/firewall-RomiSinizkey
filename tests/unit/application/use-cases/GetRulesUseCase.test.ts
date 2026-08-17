@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { GetRulesUseCase } from "../../../../src/application/use-cases/GetRulesUseCase";
-import { RuleRepository } from "../../../../src/domain/ports/RuleRepository";
+import { RuleRepository } from "../../../../src/application/ports/RuleRepository";
 import { ValidationError } from "../../../../src/application/errors/AppError";
 import { FirewallRule } from "../../../../src/domain/entities/FirewallRule";
 

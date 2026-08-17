@@ -1,5 +1,5 @@
 import { RuleMode, RuleType, RuleValue } from "../../domain/entities/FirewallRule";
-import { RuleRepository } from "../../domain/ports/RuleRepository";
+import { RuleRepository } from "../ports/RuleRepository";
 import { assertNonEmptyArray, assertValidMode, validatorsByType } from "../validation/ruleValidation";
 
 export interface AddedRuleView {

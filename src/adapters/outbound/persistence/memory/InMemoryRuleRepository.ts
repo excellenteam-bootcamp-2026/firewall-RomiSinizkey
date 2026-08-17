@@ -1,5 +1,5 @@
-import { FirewallRule, NewFirewallRule, RuleType } from "../../domain/entities/FirewallRule";
-import { RuleRepository } from "../../domain/ports/RuleRepository";
+import { FirewallRule, NewFirewallRule, RuleType } from "../../../../domain/entities/FirewallRule";
+import { RuleRepository } from "../../../../application/ports/RuleRepository";
 
 export class InMemoryRuleRepository implements RuleRepository {
   private rules: FirewallRule[] = [];
