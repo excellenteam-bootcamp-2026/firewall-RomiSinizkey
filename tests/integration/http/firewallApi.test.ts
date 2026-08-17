@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import request from "supertest";
 import { Express } from "express";
-import { createApp } from "../../../src/infrastructure/http/app";
-import { InMemoryRuleRepository } from "../../../src/infrastructure/repositories/InMemoryRuleRepository";
+import { createApp } from "../../../src/adapters/inbound/http/app";
+import { InMemoryRuleRepository } from "../../../src/adapters/outbound/persistence/memory/InMemoryRuleRepository";
 
 describe("Firewall HTTP API", () => {
   let repository: InMemoryRuleRepository;

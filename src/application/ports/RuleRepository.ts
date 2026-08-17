@@ -1,4 +1,4 @@
-import { FirewallRule, NewFirewallRule, RuleType } from "../entities/FirewallRule";
+import { FirewallRule, NewFirewallRule, RuleType } from "../../domain/entities/FirewallRule";
 
 export interface RuleRepository {
   add(rules: NewFirewallRule[]): FirewallRule[];

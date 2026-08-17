@@ -6,9 +6,11 @@ structured with Hexagonal Architecture.
 
 ## Structure
 
-- `src/domain` — entities and ports (framework-agnostic core).
-- `src/application` — use cases, validation, and error types.
-- `src/infrastructure` — Express HTTP adapter and the in-memory repository adapter.
+- `src/domain` — entities (framework-agnostic core).
+- `src/application` — ports, use cases, validation, and error types.
+- `src/adapters/inbound/http` — Express HTTP adapter (app, controllers, middleware).
+- `src/adapters/outbound/persistence/memory` — the in-memory repository adapter.
+- `src/main` — composition root: environment config, logger, and the server entry point.
 
 ## Scripts
 

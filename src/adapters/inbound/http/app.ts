@@ -1,5 +1,5 @@
 import express, { Express } from "express";
-import { RuleRepository } from "../../domain/ports/RuleRepository";
+import { RuleRepository } from "../../../application/ports/RuleRepository";
 import { createFirewallRouter } from "./controllers/firewallController";
 import { requestLogger } from "./middleware/requestLogger";
 import { errorHandler, notFoundHandler } from "./middleware/errorHandler";

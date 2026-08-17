@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { InMemoryRuleRepository } from "../../../../src/infrastructure/repositories/InMemoryRuleRepository";
-import { NewFirewallRule } from "../../../../src/domain/entities/FirewallRule";
+import { InMemoryRuleRepository } from "../../../../../../src/adapters/outbound/persistence/memory/InMemoryRuleRepository";
+import { NewFirewallRule } from "../../../../../../src/domain/entities/FirewallRule";
 
 function ipRule(value = "10.0.0.1"): NewFirewallRule {
   return { type: "ip", mode: "blacklist", value };

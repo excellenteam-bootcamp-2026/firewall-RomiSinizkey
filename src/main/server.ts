@@ -1,8 +1,8 @@
 import "dotenv/config";
-import "../../main/Logger";
-import { createApp } from "./app";
-import { InMemoryRuleRepository } from "../repositories/InMemoryRuleRepository";
-import { config } from "../../main/env";
+import "./Logger";
+import { createApp } from "../adapters/inbound/http/app";
+import { InMemoryRuleRepository } from "../adapters/outbound/persistence/memory/InMemoryRuleRepository";
+import { config } from "./env";
 
 const repository = new InMemoryRuleRepository();
 const app = createApp(repository);

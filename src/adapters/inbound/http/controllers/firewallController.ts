@@ -1,9 +1,9 @@
 import { NextFunction, Request, Response, Router } from "express";
-import { RuleRepository } from "../../../domain/ports/RuleRepository";
-import { AddRulesUseCase } from "../../../application/use-cases/AddRulesUseCase";
-import { RemoveRulesUseCase } from "../../../application/use-cases/RemoveRulesUseCase";
-import { GetRulesUseCase } from "../../../application/use-cases/GetRulesUseCase";
-import { UpdateRuleStatusUseCase } from "../../../application/use-cases/UpdateRuleStatusUseCase";
+import { RuleRepository } from "../../../../application/ports/RuleRepository";
+import { AddRulesUseCase } from "../../../../application/use-cases/AddRulesUseCase";
+import { RemoveRulesUseCase } from "../../../../application/use-cases/RemoveRulesUseCase";
+import { GetRulesUseCase } from "../../../../application/use-cases/GetRulesUseCase";
+import { UpdateRuleStatusUseCase } from "../../../../application/use-cases/UpdateRuleStatusUseCase";
 
 export function createFirewallRouter(repository: RuleRepository): Router {
   const router = Router();

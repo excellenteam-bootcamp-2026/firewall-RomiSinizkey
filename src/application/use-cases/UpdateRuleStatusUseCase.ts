@@ -1,5 +1,5 @@
 import { FirewallRule } from "../../domain/entities/FirewallRule";
-import { RuleRepository } from "../../domain/ports/RuleRepository";
+import { RuleRepository } from "../ports/RuleRepository";
 import { NotFoundError } from "../errors/AppError";
 import { assertValidActive, assertValidIds } from "../validation/ruleValidation";
 
