@@ -1,29 +1,25 @@
 import { z } from "zod";
 
-function hasHostAndPort(value: string): boolean {
-  try {
-    const url = new URL(value);
-    return url.hostname.length > 0 && url.port.length > 0;
-  } catch {
-    return false;
-  }
-}
-
-const databaseUriSchema = z.url().refine(hasHostAndPort, {
-  message: "must be a valid connection URI with an explicit host and port (e.g. scheme://host:5432/dbname)",
-});
-
 const envSchema = z.object({
   ENV: z.enum(["dev", "production"]),
   PORT: z.coerce.number().int().min(1).max(65535),
-  DEV_DATABASE_URI: databaseUriSchema,
-  PRODUCTION_DATABASE_URI: databaseUriSchema,
+  DB_CONNECTION_INTERVAL: z.coerce.number().int().positive(),
+  DB_HOST: z.string().min(1),
+  DB_PORT: z.coerce.number().int().min(1).max(65535),
+  DB_USER: z.string().min(1),
+  DB_PASSWORD: z.string().min(1),
+  DB_NAME: z.string().min(1),
 });
 
 function formatIssues(issues: { path: PropertyKey[]; message: string }[]): string {
   return issues.map((issue) => `  - ${issue.path.join(".")}: ${issue.message}`).join("\n");
 }
 
+// One shared variable group for every environment. Which real values this
+// resolves to is decided externally, by whichever .env (or injected
+// environment) the process is actually started with — ENV only controls
+// environment-specific application behavior (e.g. logging), not which set
+// of database variables gets read.
 const parsed = envSchema.safeParse(process.env);
 
 if (!parsed.success) {
@@ -32,10 +28,15 @@ if (!parsed.success) {
 
 const env = parsed.data;
 
-const databaseUri = env.ENV === "dev" ? env.DEV_DATABASE_URI : env.PRODUCTION_DATABASE_URI;
-
 export const config = Object.freeze({
   env: env.ENV,
   port: env.PORT,
-  databaseUri,
+  dbConnectionIntervalMs: env.DB_CONNECTION_INTERVAL,
+  database: Object.freeze({
+    host: env.DB_HOST,
+    port: env.DB_PORT,
+    user: env.DB_USER,
+    password: env.DB_PASSWORD,
+    database: env.DB_NAME,
+  }),
 });

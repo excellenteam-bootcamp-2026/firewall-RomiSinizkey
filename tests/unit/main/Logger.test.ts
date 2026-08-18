@@ -4,13 +4,28 @@ import util from "util";
 import fs from "fs";
 import path from "path";
 
-const ENV_KEYS = ["ENV", "PORT", "DEV_DATABASE_URI", "PRODUCTION_DATABASE_URI"] as const;
+const ENV_KEYS = [
+  "ENV",
+  "PORT",
+  "DB_CONNECTION_INTERVAL",
+  "DB_HOST",
+  "DB_PORT",
+  "DB_USER",
+  "DB_PASSWORD",
+  "DB_NAME",
+] as const;
 
+// One shared DB_* group — the same variable names are valid regardless of
+// which ENV value the tests below override onto this base fixture.
 const VALID_ENV = {
   ENV: "dev",
   PORT: "3000",
-  DEV_DATABASE_URI: "postgres://user:password@localhost:5432/firewall_dev",
-  PRODUCTION_DATABASE_URI: "postgres://user:password@localhost:5432/firewall_prod",
+  DB_CONNECTION_INTERVAL: "2000",
+  DB_HOST: "localhost",
+  DB_PORT: "5432",
+  DB_USER: "user",
+  DB_PASSWORD: "password",
+  DB_NAME: "firewall_dev",
 };
 
 function setEnv(overrides: Partial<Record<(typeof ENV_KEYS)[number], string>>): void {
