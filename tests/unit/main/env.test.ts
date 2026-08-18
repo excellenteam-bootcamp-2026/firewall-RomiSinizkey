@@ -1,15 +1,28 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
-const ENV_KEYS = ["ENV", "PORT", "DEV_DATABASE_URI", "PRODUCTION_DATABASE_URI"] as const;
+const ENV_KEYS = [
+  "ENV",
+  "PORT",
+  "DB_CONNECTION_INTERVAL",
+  "DB_HOST",
+  "DB_PORT",
+  "DB_USER",
+  "DB_PASSWORD",
+  "DB_NAME",
+] as const;
 
 const VALID_ENV = {
   ENV: "dev",
   PORT: "3000",
-  DEV_DATABASE_URI: "postgres://user:password@localhost:5432/firewall_dev",
-  PRODUCTION_DATABASE_URI: "postgres://user:password@localhost:5432/firewall_prod",
+  DB_CONNECTION_INTERVAL: "2000",
+  DB_HOST: "localhost",
+  DB_PORT: "5432",
+  DB_USER: "app_user",
+  DB_PASSWORD: "s3cret-P@ss",
+  DB_NAME: "firewall_dev",
 };
 
-// Deletes the 4 known keys first, then applies only the given overrides, so a
+// Deletes the known keys first, then applies only the given overrides, so a
 // developer's real shell-level env vars (or a locally loaded .env) can never
 // leak into a test — every test's process.env state is fully explicit.
 function setEnv(overrides: Partial<Record<(typeof ENV_KEYS)[number], string>>): void {
@@ -36,31 +49,45 @@ describe("env.ts", () => {
     process.env = { ...originalEnv };
   });
 
-  it("resolves config.databaseUri to the dev URI when ENV=dev", async () => {
+  it("resolves config.database from the single DB_* group when ENV=dev", async () => {
     setEnv(VALID_ENV);
 
     const config = await loadConfig();
 
     expect(config.env).toBe("dev");
     expect(config.port).toBe(3000);
-    expect(config.databaseUri).toBe(VALID_ENV.DEV_DATABASE_URI);
+    expect(config.dbConnectionIntervalMs).toBe(2000);
+    expect(config.database).toEqual({
+      host: "localhost",
+      port: 5432,
+      user: "app_user",
+      password: "s3cret-P@ss",
+      database: "firewall_dev",
+    });
   });
 
-  it("resolves config.databaseUri to the production URI when ENV=production", async () => {
+  it("resolves config.database from the same DB_* variable names when ENV=production", async () => {
     setEnv({ ...VALID_ENV, ENV: "production" });
 
     const config = await loadConfig();
 
     expect(config.env).toBe("production");
-    expect(config.databaseUri).toBe(VALID_ENV.PRODUCTION_DATABASE_URI);
+    expect(config.database).toEqual({
+      host: "localhost",
+      port: 5432,
+      user: "app_user",
+      password: "s3cret-P@ss",
+      database: "firewall_dev",
+    });
   });
 
-  it("only exposes env, port, and the selected databaseUri (not both raw URIs)", async () => {
+  it("only exposes env, port, dbConnectionIntervalMs, and database", async () => {
     setEnv(VALID_ENV);
 
     const config = await loadConfig();
 
-    expect(Object.keys(config).sort()).toEqual(["databaseUri", "env", "port"]);
+    expect(Object.keys(config).sort()).toEqual(["database", "dbConnectionIntervalMs", "env", "port"]);
+    expect(Object.keys(config.database).sort()).toEqual(["database", "host", "password", "port", "user"]);
   });
 
   it("throws when ENV is missing", async () => {
@@ -93,52 +120,77 @@ describe("env.ts", () => {
     await expect(loadConfig()).rejects.toThrow();
   });
 
-  it("throws when DEV_DATABASE_URI is missing", async () => {
-    setEnv({ ...VALID_ENV, DEV_DATABASE_URI: undefined });
+  it("throws when DB_CONNECTION_INTERVAL is missing", async () => {
+    setEnv({ ...VALID_ENV, DB_CONNECTION_INTERVAL: undefined });
 
     await expect(loadConfig()).rejects.toThrow();
   });
 
-  it("throws when PRODUCTION_DATABASE_URI is missing", async () => {
-    setEnv({ ...VALID_ENV, PRODUCTION_DATABASE_URI: undefined });
+  it("throws when DB_CONNECTION_INTERVAL is not a positive integer", async () => {
+    setEnv({ ...VALID_ENV, DB_CONNECTION_INTERVAL: "0" });
 
     await expect(loadConfig()).rejects.toThrow();
   });
 
-  it("throws when a database URI is not a valid URL", async () => {
-    setEnv({ ...VALID_ENV, DEV_DATABASE_URI: "not-a-url" });
+  it("throws when DB_HOST is missing", async () => {
+    setEnv({ ...VALID_ENV, DB_HOST: undefined });
 
     await expect(loadConfig()).rejects.toThrow();
   });
 
-  it("throws when a database URI has no explicit port", async () => {
-    setEnv({ ...VALID_ENV, DEV_DATABASE_URI: "postgres://user:password@localhost/firewall_dev" });
+  it("throws when DB_PORT is out of range", async () => {
+    setEnv({ ...VALID_ENV, DB_PORT: "70000" });
 
     await expect(loadConfig()).rejects.toThrow();
   });
 
-  it("throws when a database URI has no hostname", async () => {
-    setEnv({ ...VALID_ENV, DEV_DATABASE_URI: "postgres:///firewall_dev" });
+  it("throws when DB_USER is missing", async () => {
+    setEnv({ ...VALID_ENV, DB_USER: undefined });
 
     await expect(loadConfig()).rejects.toThrow();
   });
 
-  it("does not restrict the database URI to a postgres:// protocol", async () => {
-    setEnv({ ...VALID_ENV, DEV_DATABASE_URI: "mysql://user:password@localhost:3306/firewall_dev" });
+  it("throws when DB_PASSWORD is missing", async () => {
+    setEnv({ ...VALID_ENV, DB_PASSWORD: undefined });
 
-    const config = await loadConfig();
-
-    expect(config.databaseUri).toBe("mysql://user:password@localhost:3306/firewall_dev");
+    await expect(loadConfig()).rejects.toThrow();
   });
 
-  it("exports a frozen config object", async () => {
+  it("throws when DB_NAME is missing", async () => {
+    setEnv({ ...VALID_ENV, DB_NAME: undefined });
+
+    await expect(loadConfig()).rejects.toThrow();
+  });
+
+  it("a validation-failure error never contains the configured password value", async () => {
+    // DB_HOST is what's invalid here; DB_PASSWORD is still a valid, real-looking
+    // secret in process.env at the time env.ts throws — the error message must
+    // not echo it regardless of which field actually failed.
+    setEnv({ ...VALID_ENV, DB_HOST: undefined });
+
+    try {
+      await loadConfig();
+      expect.unreachable("expected loadConfig() to throw");
+    } catch (err) {
+      expect(String(err)).not.toContain(VALID_ENV.DB_PASSWORD);
+      expect(String(err)).not.toContain(VALID_ENV.DB_USER);
+    }
+  });
+
+  it("exports a frozen config object and a frozen database sub-object", async () => {
     setEnv(VALID_ENV);
 
     const config = await loadConfig();
 
     expect(Object.isFrozen(config)).toBe(true);
+    expect(Object.isFrozen(config.database)).toBe(true);
+
     expect(() => {
       (config as unknown as { port: number }).port = 9999;
+    }).toThrow(TypeError);
+
+    expect(() => {
+      (config.database as unknown as { host: string }).host = "changed";
     }).toThrow(TypeError);
   });
 });
