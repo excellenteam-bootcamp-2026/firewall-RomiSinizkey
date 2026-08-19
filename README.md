@@ -147,8 +147,9 @@ The project follows Hexagonal Architecture, with dependencies pointing inward:
 - **`src/adapters/outbound/persistence/memory`** — `InMemoryRuleRepository`, a `RuleRepository`
   implementation backed by a plain in-memory array.
 - **`src/adapters/outbound/persistence/postgres`** — the PostgreSQL/Drizzle adapter: the Drizzle
-  schema and the database connection manager (see below). This does **not** yet include a
-  `RuleRepository` implementation — see "Current persistence status."
+  schema, the database connection manager, and a pure row/domain mapper (`ruleMapper.ts`, see
+  below). This does **not** yet include a `RuleRepository` implementation — see "Current
+  persistence status."
 - **`src/main`** — the composition root: `env.ts` (configuration), `Logger.ts` (Winston
   Singleton), and `server.ts` (constructs the repository, builds the Express app, starts
   listening).
@@ -183,15 +184,15 @@ next section.
 **PostgreSQL and Drizzle ORM infrastructure has been added to this repository, but the running
 API does not use it yet.** Two separate things are true at the same time:
 
-- ✅ A Drizzle schema (`firewall_rules` table), an initial migration, and a
-  `PostgresConnection` Singleton with Stop-and-Wait retry logic all exist and are unit-tested
-  (see below).
+- ✅ A Drizzle schema (`firewall_rules` table), an initial migration, a `PostgresConnection`
+  Singleton with Stop-and-Wait retry logic, and a pure row↔domain mapper (`ruleMapper.ts`) all
+  exist and are unit-tested (see below).
 - ❌ There is **no PostgreSQL-backed implementation of `RuleRepository` yet**, and
   `src/main/server.ts` still constructs and uses `InMemoryRuleRepository` exclusively. No HTTP
   request currently reaches PostgreSQL. Rule data is **not** persisted across server restarts.
 
-Implementing the PostgreSQL repository, the row↔domain mapping, and wiring it into the server are
-tracked as upcoming work — see "Current limitations / roadmap."
+Implementing the PostgreSQL repository and wiring it into the server are tracked as upcoming
+work — see "Current limitations / roadmap."
 
 ## PostgreSQL and Drizzle setup
 
@@ -272,6 +273,31 @@ successfully), so re-running migrations does not attempt to recreate tables that
 and unit-tested in isolation, but the running server does not currently establish a PostgreSQL
 connection at startup.
 
+## Row and insert mapping
+
+`src/adapters/outbound/persistence/postgres/ruleMapper.ts` is a pure, dependency-free mapper
+between Drizzle rows and the `FirewallRule` domain model — it opens no database connection and is
+unit-tested with plain objects only:
+
+- **`toDomainRule(row)`** — converts a Drizzle `firewall_rules` row into a `FirewallRule`. `id`,
+  `type`, `mode`, and `active` are carried over as-is; IP and domain `value`s stay strings, and a
+  port `value` stored as text (e.g. `"443"`) is converted to a number (`443`). An invalid `type`,
+  an invalid `mode`, non-numeric port text (e.g. `"abc"`), or an out-of-range port are all
+  rejected via the same validators the HTTP layer already uses (`ruleValidation.ts`), instead of
+  being cast or passed through silently.
+- **`toInsertRow(rule)`** — converts a new domain rule (`NewFirewallRule`) into the object Drizzle
+  needs for an insert. IP and domain `value`s stay strings; a numeric port `value` (e.g. `8080`)
+  is converted to text (`"8080"`) for storage. New rows are always inserted with `active: true`,
+  matching how `InMemoryRuleRepository` already treats new rules.
+
+Row and insert types (`FirewallRuleRow`, `NewFirewallRuleRow`) are inferred directly from the
+Drizzle schema (`typeof firewallRules.$inferSelect` / `$inferInsert`) rather than hand-duplicated,
+and neither type is exposed outside this adapter — `domain/` and `application/` still know
+nothing about Drizzle.
+
+**This mapper is not yet called anywhere in a `RuleRepository` implementation.** It is fully
+implemented and unit-tested in isolation, ready for a future PostgreSQL-backed repository to use.
+
 ## Installation and running
 
 PostgreSQL must already be running and `.env` must be configured before starting the server
@@ -345,9 +371,11 @@ The test suite (Vitest) currently covers: validation rules, all four use cases (
 repository), the in-memory repository's behavior including its atomic delete/update guarantees,
 environment configuration validation (including that error messages never leak secret values),
 the Winston Logger Singleton, the `PostgresConnection` Singleton and its Stop-and-Wait retry
-behavior (fully mocked — no real database required), and the full HTTP API end-to-end via
-Supertest against `InMemoryRuleRepository`. Run `npm test` for the current pass/fail status and
-test counts, since these change as the project grows.
+behavior (fully mocked — no real database required), the PostgreSQL row/domain mapper
+(`ruleMapper.ts`, plain objects only — no database connection), and the full HTTP API end-to-end
+via Supertest against `InMemoryRuleRepository`. As of this update: **11 test files, 162 tests**.
+Run `npm test` for the current pass/fail status and test counts, since these change as the
+project grows.
 
 ## Technology stack
 
@@ -362,10 +390,11 @@ test counts, since these change as the project grows.
 
 ## Current limitations / roadmap
 
+✅ **Done:** the row/domain mapper (`ruleMapper.ts`) — translating between Drizzle rows and
+`FirewallRule`, including the string↔number handling needed for port values stored as `TEXT`.
+
 The following database-related work is **not yet implemented**:
 
-- A row-to-domain mapper (translating between Drizzle rows and `FirewallRule`, including the
-  string↔number handling needed for port values stored as `TEXT`).
 - A PostgreSQL/Drizzle implementation of the `RuleRepository` port.
 - Converting `RuleRepository`, the use cases, and the controller to an async flow — the current
   port and use cases are fully synchronous, which a real database-backed repository cannot
