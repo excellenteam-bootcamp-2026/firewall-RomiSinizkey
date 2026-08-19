@@ -25,6 +25,17 @@ function setEnv(overrides: Partial<Record<(typeof ENV_KEYS)[number], string>>): 
   }
 }
 
+// Mirrors connection.ts's computeBackoffDelayMs summed over N failed
+// attempts, so tests advance fake timers by exactly the real cumulative
+// delay instead of guessing a generous buffer.
+function totalBackoffDelay(initialDelayMs: number, failedAttempts: number): number {
+  let total = 0;
+  for (let attempt = 1; attempt <= failedAttempts; attempt++) {
+    total += initialDelayMs * 2 ** (attempt - 1);
+  }
+  return total;
+}
+
 // Fakes for "pg" and the Logger, defined via vi.hoisted() so they're
 // available inside the hoisted vi.mock() factories below and reused (not
 // re-created) across every vi.resetModules() call — this is what lets each
@@ -105,11 +116,23 @@ describe("PostgresConnection", () => {
     process.env = { ...originalEnv };
   });
 
-  it("getInstance() returns the same Singleton instance", async () => {
-    const { PostgresConnection } = await loadConnectionModule();
+  // This is the first test in the file, so it's the one that pays the
+  // one-time cost of transforming this module's real (unmocked)
+  // drizzle-orm/node-postgres dependency — the only heavy import in this
+  // whole suite. Every later test in this file re-imports after
+  // vi.resetModules(), but reuses the already-transformed source, so only
+  // this first import can be genuinely slow under CPU contention. A scoped
+  // timeout here (not the global default) gives that one-time cost
+  // legitimate headroom without masking a real hang anywhere else.
+  it(
+    "getInstance() returns the same Singleton instance",
+    async () => {
+      const { PostgresConnection } = await loadConnectionModule();
 
-    expect(PostgresConnection.getInstance()).toBe(PostgresConnection.getInstance());
-  });
+      expect(PostgresConnection.getInstance()).toBe(PostgresConnection.getInstance());
+    },
+    15000,
+  );
 
   it("constructs the Pool only once across a sequence with retries", async () => {
     const { postgresConnection } = await loadConnectionModule();
@@ -171,7 +194,7 @@ describe("PostgresConnection", () => {
     };
 
     const connectPromise = postgresConnection.connect();
-    await vi.advanceTimersByTimeAsync(INTERVAL_MS * 5);
+    await vi.advanceTimersByTimeAsync(totalBackoffDelay(INTERVAL_MS, 3));
     const db = await connectPromise;
 
     expect(db).toBeDefined();
@@ -207,7 +230,7 @@ describe("PostgresConnection", () => {
 
     const connectPromise = postgresConnection.connect();
     connectPromise.catch(() => undefined);
-    await vi.advanceTimersByTimeAsync(INTERVAL_MS * MAX_CONNECTION_ATTEMPTS);
+    await vi.advanceTimersByTimeAsync(totalBackoffDelay(INTERVAL_MS, MAX_CONNECTION_ATTEMPTS - 1));
 
     await expect(connectPromise).rejects.toThrow();
     expect(pgMock.state.queryTimestamps).toHaveLength(MAX_CONNECTION_ATTEMPTS);
@@ -221,9 +244,10 @@ describe("PostgresConnection", () => {
 
     const connectPromise = postgresConnection.connect();
     connectPromise.catch(() => undefined);
-    // Exactly 4 delays occur between 5 attempts; advancing by only that much
-    // (not a 5th interval) must already be enough for the promise to settle.
-    await vi.advanceTimersByTimeAsync(INTERVAL_MS * (MAX_CONNECTION_ATTEMPTS - 1));
+    // Exactly 4 backoff delays occur between 5 attempts (1x, 2x, 4x, 8x the
+    // initial interval); advancing by precisely their sum — not a 5th delay
+    // on top — must already be enough for the promise to settle.
+    await vi.advanceTimersByTimeAsync(totalBackoffDelay(INTERVAL_MS, MAX_CONNECTION_ATTEMPTS - 1));
 
     await expect(connectPromise).rejects.toThrow();
   });
@@ -236,7 +260,7 @@ describe("PostgresConnection", () => {
 
     const connectPromise = postgresConnection.connect();
     connectPromise.catch(() => undefined);
-    await vi.advanceTimersByTimeAsync(INTERVAL_MS * MAX_CONNECTION_ATTEMPTS);
+    await vi.advanceTimersByTimeAsync(totalBackoffDelay(INTERVAL_MS, MAX_CONNECTION_ATTEMPTS - 1));
     await expect(connectPromise).rejects.toThrow();
 
     expect(loggerMock.error).toHaveBeenCalledTimes(1);
@@ -251,7 +275,7 @@ describe("PostgresConnection", () => {
 
     const connectPromise = postgresConnection.connect();
     connectPromise.catch(() => undefined);
-    await vi.advanceTimersByTimeAsync(INTERVAL_MS * MAX_CONNECTION_ATTEMPTS);
+    await vi.advanceTimersByTimeAsync(totalBackoffDelay(INTERVAL_MS, MAX_CONNECTION_ATTEMPTS - 1));
     await expect(connectPromise).rejects.toThrow();
 
     expect(pgMock.state.endCalls).toBe(1);
@@ -284,7 +308,7 @@ describe("PostgresConnection", () => {
 
     const firstAttempt = postgresConnection.connect();
     firstAttempt.catch(() => undefined);
-    await vi.advanceTimersByTimeAsync(INTERVAL_MS * MAX_CONNECTION_ATTEMPTS);
+    await vi.advanceTimersByTimeAsync(totalBackoffDelay(INTERVAL_MS, MAX_CONNECTION_ATTEMPTS - 1));
     await expect(firstAttempt).rejects.toThrow();
 
     pgMock.state.queryImpl = async () => ({ rows: [] });
@@ -351,5 +375,64 @@ describe("PostgresConnection", () => {
     await postgresConnection.connect();
 
     expect(pgMock.state.poolConfigs[0].host).toBe("prod.internal");
+  });
+
+  describe("Exponential Backoff (Issue #33)", () => {
+    it("computeBackoffDelayMs uses DB_CONNECTION_INTERVAL as the initial delay and doubles per failed attempt", async () => {
+      const { computeBackoffDelayMs } = await loadConnectionModule();
+
+      expect(computeBackoffDelayMs(1000, 1)).toBe(1000);
+      expect(computeBackoffDelayMs(1000, 2)).toBe(2000);
+      expect(computeBackoffDelayMs(1000, 3)).toBe(4000);
+      expect(computeBackoffDelayMs(1000, 4)).toBe(8000);
+    });
+
+    it("the first connection attempt happens immediately, with no delay beforehand", async () => {
+      const { postgresConnection } = await loadConnectionModule();
+      pgMock.state.queryImpl = async () => ({ rows: [] });
+
+      const startedAt = Date.now();
+      await postgresConnection.connect();
+
+      expect(pgMock.state.queryTimestamps[0]).toBe(startedAt);
+    });
+
+    it("delays follow the exact doubling sequence: 1x, 2x, 4x, 8x the initial interval", async () => {
+      const { postgresConnection, MAX_CONNECTION_ATTEMPTS } = await loadConnectionModule();
+      pgMock.state.queryImpl = async () => {
+        throw new Error("connection refused");
+      };
+
+      const connectPromise = postgresConnection.connect();
+      connectPromise.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(totalBackoffDelay(INTERVAL_MS, MAX_CONNECTION_ATTEMPTS - 1));
+      await expect(connectPromise).rejects.toThrow();
+
+      const timestamps = pgMock.state.queryTimestamps;
+      const actualDelays = timestamps.slice(1).map((t, i) => t - timestamps[i]);
+
+      expect(actualDelays).toEqual([INTERVAL_MS, INTERVAL_MS * 2, INTERVAL_MS * 4, INTERVAL_MS * 8]);
+    });
+
+    it("a successful retry stops further attempts — no additional delay or query happens afterward", async () => {
+      const { postgresConnection } = await loadConnectionModule();
+      let calls = 0;
+      pgMock.state.queryImpl = async () => {
+        calls += 1;
+        if (calls < 2) throw new Error("connection refused");
+        return { rows: [] };
+      };
+
+      const connectPromise = postgresConnection.connect();
+      await vi.advanceTimersByTimeAsync(totalBackoffDelay(INTERVAL_MS, 1));
+      await connectPromise;
+
+      const queryCountAfterSuccess = pgMock.state.queryTimestamps.length;
+      // Advance well past where further backoff delays would have fired if
+      // the retry loop had kept going.
+      await vi.advanceTimersByTimeAsync(totalBackoffDelay(INTERVAL_MS, 4));
+
+      expect(pgMock.state.queryTimestamps).toHaveLength(queryCountAfterSuccess);
+    });
   });
 });
