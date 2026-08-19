@@ -34,19 +34,19 @@ describe("UpdateRuleStatusUseCase", () => {
   });
 
   describe("valid ids and active value", () => {
-    it("forwards active: true unchanged, calling repository.updateStatus exactly once with the exact ids and value", () => {
-      vi.mocked(repository.updateStatus).mockReturnValue({ updated: [], missingIds: [] });
+    it("forwards active: true unchanged, calling repository.updateStatus exactly once with the exact ids and value", async () => {
+      vi.mocked(repository.updateStatus).mockResolvedValue({ updated: [], missingIds: [] });
 
-      useCase.execute([1, 2, 3], true);
+      await useCase.execute([1, 2, 3], true);
 
       expect(repository.updateStatus).toHaveBeenCalledTimes(1);
       expect(repository.updateStatus).toHaveBeenCalledWith([1, 2, 3], true);
     });
 
-    it("forwards active: false unchanged, calling repository.updateStatus exactly once with the exact ids and value", () => {
-      vi.mocked(repository.updateStatus).mockReturnValue({ updated: [], missingIds: [] });
+    it("forwards active: false unchanged, calling repository.updateStatus exactly once with the exact ids and value", async () => {
+      vi.mocked(repository.updateStatus).mockResolvedValue({ updated: [], missingIds: [] });
 
-      useCase.execute([4, 5], false);
+      await useCase.execute([4, 5], false);
 
       expect(repository.updateStatus).toHaveBeenCalledTimes(1);
       expect(repository.updateStatus).toHaveBeenCalledWith([4, 5], false);
@@ -54,26 +54,26 @@ describe("UpdateRuleStatusUseCase", () => {
   });
 
   describe("success (no missing ids)", () => {
-    it("returns exactly { updated, status: 'success' } using the mock's return value", () => {
+    it("returns exactly { updated, status: 'success' } using the mock's return value", async () => {
       const updated: FirewallRule[] = [
         rule({ id: 1, active: false }),
         rule({ id: 2, active: false }),
       ];
-      vi.mocked(repository.updateStatus).mockReturnValue({ updated, missingIds: [] });
+      vi.mocked(repository.updateStatus).mockResolvedValue({ updated, missingIds: [] });
 
-      const result = useCase.execute([1, 2], false);
+      const result = await useCase.execute([1, 2], false);
 
       expect(result).toEqual({ updated, status: "success" });
     });
   });
 
   describe("missing ids", () => {
-    it("throws NotFoundError with code RULE_NOT_FOUND, status 404, and the missing id in the message (single id)", () => {
-      vi.mocked(repository.updateStatus).mockReturnValue({ updated: [], missingIds: [42] });
+    it("throws NotFoundError with code RULE_NOT_FOUND, status 404, and the missing id in the message (single id)", async () => {
+      vi.mocked(repository.updateStatus).mockResolvedValue({ updated: [], missingIds: [42] });
 
       let thrown: unknown;
       try {
-        useCase.execute([42], true);
+        await useCase.execute([42], true);
       } catch (err) {
         thrown = err;
       }
@@ -85,12 +85,12 @@ describe("UpdateRuleStatusUseCase", () => {
       expect(error.message).toContain("42");
     });
 
-    it("throws NotFoundError whose message contains all missing ids (multiple ids)", () => {
-      vi.mocked(repository.updateStatus).mockReturnValue({ updated: [], missingIds: [7, 8, 9] });
+    it("throws NotFoundError whose message contains all missing ids (multiple ids)", async () => {
+      vi.mocked(repository.updateStatus).mockResolvedValue({ updated: [], missingIds: [7, 8, 9] });
 
       let thrown: unknown;
       try {
-        useCase.execute([7, 8, 9], true);
+        await useCase.execute([7, 8, 9], true);
       } catch (err) {
         thrown = err;
       }
@@ -106,40 +106,40 @@ describe("UpdateRuleStatusUseCase", () => {
   });
 
   describe("invalid ids (with a valid active value)", () => {
-    it("throws ValidationError for an empty array and does not call repository.updateStatus", () => {
-      expect(() => useCase.execute([], true)).toThrow(ValidationError);
+    it("throws ValidationError for an empty array and does not call repository.updateStatus", async () => {
+      await expect(useCase.execute([], true)).rejects.toThrow(ValidationError);
       expect(repository.updateStatus).not.toHaveBeenCalled();
     });
 
-    it("throws ValidationError for a non-array and does not call repository.updateStatus", () => {
-      expect(() => useCase.execute(undefined, true)).toThrow(ValidationError);
+    it("throws ValidationError for a non-array and does not call repository.updateStatus", async () => {
+      await expect(useCase.execute(undefined, true)).rejects.toThrow(ValidationError);
       expect(repository.updateStatus).not.toHaveBeenCalled();
     });
 
-    it("throws ValidationError for non-integer entries and does not call repository.updateStatus", () => {
-      expect(() => useCase.execute([1.5], true)).toThrow(ValidationError);
+    it("throws ValidationError for non-integer entries and does not call repository.updateStatus", async () => {
+      await expect(useCase.execute([1.5], true)).rejects.toThrow(ValidationError);
       expect(repository.updateStatus).not.toHaveBeenCalled();
     });
 
-    it("throws ValidationError for non-number entries and does not call repository.updateStatus", () => {
-      expect(() => useCase.execute(["1"], true)).toThrow(ValidationError);
+    it("throws ValidationError for non-number entries and does not call repository.updateStatus", async () => {
+      await expect(useCase.execute(["1"], true)).rejects.toThrow(ValidationError);
       expect(repository.updateStatus).not.toHaveBeenCalled();
     });
   });
 
   describe("invalid active value (with valid ids)", () => {
-    it("throws ValidationError for a string and does not call repository.updateStatus", () => {
-      expect(() => useCase.execute([1], "true")).toThrow(ValidationError);
+    it("throws ValidationError for a string and does not call repository.updateStatus", async () => {
+      await expect(useCase.execute([1], "true")).rejects.toThrow(ValidationError);
       expect(repository.updateStatus).not.toHaveBeenCalled();
     });
 
-    it("throws ValidationError for a number and does not call repository.updateStatus", () => {
-      expect(() => useCase.execute([1], 1)).toThrow(ValidationError);
+    it("throws ValidationError for a number and does not call repository.updateStatus", async () => {
+      await expect(useCase.execute([1], 1)).rejects.toThrow(ValidationError);
       expect(repository.updateStatus).not.toHaveBeenCalled();
     });
 
-    it("throws ValidationError for undefined and does not call repository.updateStatus", () => {
-      expect(() => useCase.execute([1], undefined)).toThrow(ValidationError);
+    it("throws ValidationError for undefined and does not call repository.updateStatus", async () => {
+      await expect(useCase.execute([1], undefined)).rejects.toThrow(ValidationError);
       expect(repository.updateStatus).not.toHaveBeenCalled();
     });
   });

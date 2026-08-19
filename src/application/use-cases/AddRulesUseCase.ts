@@ -18,7 +18,7 @@ export interface AddRulesResult {
 export class AddRulesUseCase {
   constructor(private readonly repository: RuleRepository) {}
 
-  execute(type: RuleType, rawValues: unknown, rawMode: unknown): AddRulesResult {
+  async execute(type: RuleType, rawValues: unknown, rawMode: unknown): Promise<AddRulesResult> {
     assertValidMode(rawMode);
     assertNonEmptyArray<RuleValue>(rawValues, "INVALID_VALUES", "values must be a non-empty array.");
 
@@ -26,7 +26,7 @@ export class AddRulesUseCase {
     const validate: (values: unknown[]) => asserts values is RuleValue[] = validatorsByType[type];
     validate(values);
 
-    const created = this.repository.add(
+    const created = await this.repository.add(
       (values as RuleValue[]).map((value) => ({ type, mode: rawMode, value }))
     );
     const view = created.map(({ id, value, active }) => ({ id, value, active }));
