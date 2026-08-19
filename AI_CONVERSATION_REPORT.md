@@ -237,3 +237,61 @@ again with a fresh `npm run build && npm test`.
 continuously used `InMemoryRuleRepository` only. No HTTP request has reached PostgreSQL at any
 point covered by this report, and rule data does not persist across server restarts until Issue
 #31 is implemented.
+
+## 9. Issue #31 — PostgreSQL Production Wiring (Claude, implemented and verified)
+
+**Objective:** wire the already-built PostgreSQL infrastructure (Issues #27–#30) into the actual
+running server, replacing `InMemoryRuleRepository` in production.
+
+**Implementation:**
+
+- Created `src/main/startServer.ts` for application startup and shutdown orchestration.
+- Simplified `src/main/server.ts` into a thin entry point that calls `startServer()` and exits on
+  failure.
+- The server now awaits `postgresConnection.connect()` — reusing the Issue #28 Singleton and its
+  Stop-and-Wait retry unchanged — before constructing the repository and starting Express.
+- The live application now injects `DrizzleRuleRepository` instead of `InMemoryRuleRepository`.
+  `InMemoryRuleRepository` remains in the codebase and is still used directly by unit and HTTP
+  integration tests.
+- Startup failures are logged and cause the process to exit with a failure code — the server never
+  comes up without a working database connection.
+- Added graceful shutdown for `SIGINT` and `SIGTERM`. Shutdown closes the HTTP server and the
+  PostgreSQL connection (the pool close is always attempted, even if the HTTP close fails).
+  Repeated shutdown requests are handled safely — closing resources only once.
+
+**Tests:** `tests/unit/main/startServer.test.ts` — nine unit tests covering startup ordering
+(connect before `createApp`/`listen`), dependency wiring (`DrizzleRuleRepository` constructed and
+injected), failure handling (a failed connection prevents the server from starting, with no
+unhandled rejection), and shutdown behavior (both resources closed, idempotent on repeated calls
+or repeated signals, pool still closed if the HTTP close fails). All dependencies mocked — no real
+database, no real port bound.
+
+**Verification:**
+
+- `npm run build` passed.
+- Default test run passed 171 tests; 17 PostgreSQL integration tests were skipped because
+  `TEST_DB_*` variables were not configured (by design — see Issue #30, §6.4).
+- Manual verification succeeded: the server connected to `firewall_dev`; a firewall IP rule was
+  added through the `POST` API; the inserted rule was visible in PostgreSQL through `psql`/DBeaver;
+  the server was restarted and the rule still existed, confirming real persistence rather than
+  just a passing test.
+
+`README.md` was updated afterward to remove every claim that the live server still used
+`InMemoryRuleRepository` or that PostgreSQL wiring was pending, and to document the new
+startup/shutdown sequence.
+
+## 10. Stop-and-Wait Requirement Status
+
+The project's mandatory Stop-and-Wait database-connection requirement is implemented, and — as of
+Issue #31 — is now exercised by the live server itself, not only by its own unit tests:
+
+- Failed PostgreSQL connection attempts are retried, one at a time, never in parallel.
+- A fixed delay is used between attempts.
+- The delay is configured through `DB_CONNECTION_INTERVAL`, not hardcoded.
+- The server does not start accepting HTTP traffic before the database connection succeeds —
+  `app.listen` is unreachable until the connection resolves.
+- Retry behavior and Singleton behavior have unit-test coverage
+  (`tests/unit/adapters/outbound/persistence/postgres/connection.test.ts`), with the PostgreSQL
+  driver mocked so no real database is required to verify the retry logic itself.
+- Exponential Backoff remains optional and is not currently required — the fixed-interval
+  Stop-and-Wait behavior is what the requirements call for and what is implemented.
