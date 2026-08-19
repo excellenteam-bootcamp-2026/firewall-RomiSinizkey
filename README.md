@@ -147,9 +147,9 @@ The project follows Hexagonal Architecture, with dependencies pointing inward:
 - **`src/adapters/outbound/persistence/memory`** — `InMemoryRuleRepository`, a `RuleRepository`
   implementation backed by a plain in-memory array.
 - **`src/adapters/outbound/persistence/postgres`** — the PostgreSQL/Drizzle adapter: the Drizzle
-  schema, the database connection manager, and a pure row/domain mapper (`ruleMapper.ts`, see
-  below). This does **not** yet include a `RuleRepository` implementation — see "Current
-  persistence status."
+  schema, the database connection manager, a pure row/domain mapper (`ruleMapper.ts`), and
+  `DrizzleRuleRepository` — a full `RuleRepository` implementation (see below). It is implemented
+  and tested but **not yet constructed by `server.ts`** — see "Current persistence status."
 - **`src/main`** — the composition root: `env.ts` (configuration), `Logger.ts` (Winston
   Singleton), and `server.ts` (constructs the repository, builds the Express app, starts
   listening).
@@ -179,20 +179,30 @@ JSON Response
 Today, the repository at the bottom of that chain is always `InMemoryRuleRepository` — see the
 next section.
 
+Every step in this chain — the `RuleRepository` port, all four use cases, and the controller's
+route handlers — is now asynchronous (`Promise`-based, using `async`/`await`), so a real database
+call at the bottom of the chain doesn't block the event loop. `InMemoryRuleRepository` still
+resolves immediately (no real I/O), so this is invisible to its behavior; it's what makes
+`DrizzleRuleRepository` (see below) a drop-in replacement for it.
+
 ## Current persistence status
 
 **PostgreSQL and Drizzle ORM infrastructure has been added to this repository, but the running
 API does not use it yet.** Two separate things are true at the same time:
 
 - ✅ A Drizzle schema (`firewall_rules` table), an initial migration, a `PostgresConnection`
-  Singleton with Stop-and-Wait retry logic, and a pure row↔domain mapper (`ruleMapper.ts`) all
-  exist and are unit-tested (see below).
-- ❌ There is **no PostgreSQL-backed implementation of `RuleRepository` yet**, and
-  `src/main/server.ts` still constructs and uses `InMemoryRuleRepository` exclusively. No HTTP
-  request currently reaches PostgreSQL. Rule data is **not** persisted across server restarts.
+  Singleton with Stop-and-Wait retry logic, a pure row↔domain mapper (`ruleMapper.ts`), and a
+  full `DrizzleRuleRepository` implementation (`add`, `getAll`, `removeByIds`, `updateStatus`,
+  with transactional atomicity) all exist and are tested — the last of these against a real,
+  isolated PostgreSQL database (see "DrizzleRuleRepository" and "Testing and verification"
+  below).
+- ❌ `src/main/server.ts` still constructs and uses `InMemoryRuleRepository` exclusively —
+  nothing in `main/` constructs a `DrizzleRuleRepository` or calls
+  `PostgresConnection.connect()`. No HTTP request currently reaches PostgreSQL. Rule data is
+  **not** persisted across server restarts.
 
-Implementing the PostgreSQL repository and wiring it into the server are tracked as upcoming
-work — see "Current limitations / roadmap."
+Wiring the PostgreSQL repository into the running server is tracked as upcoming work (Issue
+#31) — see "Current limitations / roadmap."
 
 ## PostgreSQL and Drizzle setup
 
@@ -236,6 +246,20 @@ with a descriptive error if any are missing or invalid. See `.env.example` for t
 | `DB_USER` | PostgreSQL username. |
 | `DB_PASSWORD` | PostgreSQL password. |
 | `DB_NAME` | PostgreSQL database name. |
+
+### Integration-test-only variables
+
+`tests/integration/db/testDatabase.ts` reads these directly — they are **not** part of
+`src/main/env.ts`'s Zod schema and are never read by the running application. Leave them unset
+to skip the `DrizzleRuleRepository` integration tests locally.
+
+| Variable | Purpose |
+|---|---|
+| `TEST_DB_HOST` | Host for the isolated integration-test database. |
+| `TEST_DB_PORT` | Port for the isolated integration-test database. |
+| `TEST_DB_USER` | Username for the isolated integration-test database. |
+| `TEST_DB_PASSWORD` | Password for the isolated integration-test database. |
+| `TEST_DB_NAME` | Database name — **must end with `_test`**; the test suite refuses to run (before any migration, cleanup, or query) otherwise, so it can never target `firewall_dev` or any other non-test database. |
 
 ## Database structure
 
@@ -295,8 +319,35 @@ Drizzle schema (`typeof firewallRules.$inferSelect` / `$inferInsert`) rather tha
 and neither type is exposed outside this adapter — `domain/` and `application/` still know
 nothing about Drizzle.
 
-**This mapper is not yet called anywhere in a `RuleRepository` implementation.** It is fully
-implemented and unit-tested in isolation, ready for a future PostgreSQL-backed repository to use.
+**This mapper is now used by `DrizzleRuleRepository`** (see below) for every row it reads or
+writes — no conversion logic is duplicated between the two files.
+
+## DrizzleRuleRepository
+
+`src/adapters/outbound/persistence/postgres/DrizzleRuleRepository.ts` implements the full
+`RuleRepository` port using Drizzle, reusing the row/domain mapper above (`toDomainRule` /
+`toInsertRow`) for every row it reads or writes:
+
+- **`add(rules)`** — a single `INSERT ... RETURNING`, mapped back through `toDomainRule` and
+  sorted by `id` ascending (Postgres doesn't guarantee `RETURNING` row order). An empty array
+  short-circuits to `[]` without issuing a query.
+- **`getAll(type?)`** — a single `SELECT`, optionally filtered by `type`, always
+  `ORDER BY id ASC` for deterministic results.
+- **`removeByIds(ids)`** and **`updateStatus(ids, active)`** — both run inside one PostgreSQL
+  transaction: `SELECT ... FOR UPDATE` locks exactly the requested rows first, closing the race
+  between checking which ids exist and acting on them; only if every id exists does the
+  `DELETE`/`UPDATE ... RETURNING` run, still under the same locks. If any id is missing, nothing
+  is written — the transaction commits as a no-op — and `{ removed: [], missingIds }` /
+  `{ updated: [], missingIds }` is returned, exactly mirroring `InMemoryRuleRepository`'s atomic
+  behavior (including that a missing id repeated twice in the request appears twice in
+  `missingIds`). An empty `ids` array short-circuits before any transaction or query.
+
+`DrizzleRuleRepository`'s constructor takes a plain `NodePgDatabase`, not `PostgresConnection`
+itself, so it can be constructed and tested with any Drizzle database instance without touching
+the app's connection Singleton.
+
+**Nothing in `server.ts` constructs a `DrizzleRuleRepository` yet** — see "Current persistence
+status."
 
 ## Installation and running
 
@@ -372,10 +423,22 @@ repository), the in-memory repository's behavior including its atomic delete/upd
 environment configuration validation (including that error messages never leak secret values),
 the Winston Logger Singleton, the `PostgresConnection` Singleton and its Stop-and-Wait retry
 behavior (fully mocked — no real database required), the PostgreSQL row/domain mapper
-(`ruleMapper.ts`, plain objects only — no database connection), and the full HTTP API end-to-end
-via Supertest against `InMemoryRuleRepository`. As of this update: **11 test files, 162 tests**.
-Run `npm test` for the current pass/fail status and test counts, since these change as the
-project grows.
+(`ruleMapper.ts`, plain objects only — no database connection), `DrizzleRuleRepository` against a
+real, isolated PostgreSQL database (`tests/integration/db/`, including its transactional
+atomicity), and the full HTTP API end-to-end via Supertest against `InMemoryRuleRepository`.
+
+The `DrizzleRuleRepository` integration tests skip automatically when no test database is
+configured (`TEST_DB_NAME` unset — see "Environment variables"), so `npm test` stays fully
+offline for anyone without a local PostgreSQL instance. As of this update:
+
+- **Without a test database:** 162 tests passed, 17 skipped (12 test files, 1 of them skipped).
+- **With `TEST_DB_*` pointed at an isolated `..._test` database:** all 179 tests passed.
+
+GitHub Actions (`.github/workflows/ci.yml`) starts an ephemeral PostgreSQL 16 service container
+for every run and points `TEST_DB_*` at it, so CI always exercises the full 179-test suite,
+including the database integration tests — against a disposable container, never a persistent or
+development database. Run `npm test` for the current pass/fail status and test counts, since
+these change as the project grows.
 
 ## Technology stack
 
@@ -390,22 +453,23 @@ project grows.
 
 ## Current limitations / roadmap
 
-✅ **Done:** the row/domain mapper (`ruleMapper.ts`) — translating between Drizzle rows and
-`FirewallRule`, including the string↔number handling needed for port values stored as `TEXT`.
+✅ **Done:**
 
-The following database-related work is **not yet implemented**:
+- The row/domain mapper (`ruleMapper.ts`) — translating between Drizzle rows and `FirewallRule`,
+  including the string↔number handling needed for port values stored as `TEXT`.
+- Converting `RuleRepository`, all four use cases, and the controller to an asynchronous
+  (`Promise`-based) flow.
+- `DrizzleRuleRepository` — a full, transactional `RuleRepository` implementation — plus
+  integration tests that exercise it against a real, isolated PostgreSQL database (mirroring the
+  existing `InMemoryRuleRepository` test coverage, including atomicity).
 
-- A PostgreSQL/Drizzle implementation of the `RuleRepository` port.
-- Converting `RuleRepository`, the use cases, and the controller to an async flow — the current
-  port and use cases are fully synchronous, which a real database-backed repository cannot
-  satisfy without this change.
-- Wiring `PostgresConnection` into `server.ts` so the server actually connects to PostgreSQL and
-  uses a PostgreSQL-backed repository instead of `InMemoryRuleRepository`.
+The following work remains — all of it tracked under Issue #31 (server wiring):
+
+- Constructing a `DrizzleRuleRepository` in `server.ts` instead of `InMemoryRuleRepository`, and
+  initializing `PostgresConnection` asynchronously before the server starts listening.
 - A graceful database shutdown hook (e.g. on `SIGINT`/`SIGTERM`) once the server is wired to
   PostgreSQL — `PostgresConnection.shutdown()` exists but nothing currently calls it from
   `server.ts`.
-- Integration tests that exercise a real PostgreSQL-backed repository (CRUD and atomicity),
-  mirroring the existing `InMemoryRuleRepository` test coverage.
 
 ## How the request flow works (beginner-friendly walkthrough)
 

@@ -25,14 +25,14 @@ function groupByMode(rules: FirewallRule[]): RulesByMode {
 export class GetRulesUseCase {
   constructor(private readonly repository: RuleRepository) {}
 
-  execute(rawType?: unknown): GetRulesResult {
+  async execute(rawType?: unknown): Promise<GetRulesResult> {
     if (rawType !== undefined) {
       assertValidRuleType(rawType);
-      const rules = this.repository.getAll(rawType);
+      const rules = await this.repository.getAll(rawType);
       return { [RESPONSE_KEY_BY_TYPE[rawType]]: groupByMode(rules) };
     }
 
-    const all = this.repository.getAll();
+    const all = await this.repository.getAll();
     return {
       ips: groupByMode(all.filter((rule) => rule.type === "ip")),
       domains: groupByMode(all.filter((rule) => rule.type === "domain")),

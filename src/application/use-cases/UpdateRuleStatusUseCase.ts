@@ -11,11 +11,11 @@ export interface UpdateRuleStatusResult {
 export class UpdateRuleStatusUseCase {
   constructor(private readonly repository: RuleRepository) {}
 
-  execute(rawIds: unknown, rawActive: unknown): UpdateRuleStatusResult {
+  async execute(rawIds: unknown, rawActive: unknown): Promise<UpdateRuleStatusResult> {
     assertValidIds(rawIds);
     assertValidActive(rawActive);
 
-    const { updated, missingIds } = this.repository.updateStatus(rawIds, rawActive);
+    const { updated, missingIds } = await this.repository.updateStatus(rawIds, rawActive);
     if (missingIds.length > 0) {
       throw new NotFoundError("RULE_NOT_FOUND", `No rule(s) found for id(s): ${missingIds.join(", ")}.`);
     }

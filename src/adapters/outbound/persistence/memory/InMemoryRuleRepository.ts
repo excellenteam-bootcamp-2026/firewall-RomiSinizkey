@@ -5,13 +5,13 @@ export class InMemoryRuleRepository implements RuleRepository {
   private rules: FirewallRule[] = [];
   private nextId = 1;
 
-  add(newRules: NewFirewallRule[]): FirewallRule[] {
+  async add(newRules: NewFirewallRule[]): Promise<FirewallRule[]> {
     const created = newRules.map((rule) => ({ ...rule, id: this.nextId++, active: true }));
     this.rules.push(...created);
     return created;
   }
 
-  removeByIds(ids: number[]): { removed: FirewallRule[]; missingIds: number[] } {
+  async removeByIds(ids: number[]): Promise<{ removed: FirewallRule[]; missingIds: number[] }> {
     const idSet = new Set(ids);
     const existingIds = new Set(this.rules.map((rule) => rule.id));
     const missingIds = ids.filter((id) => !existingIds.has(id));
@@ -26,11 +26,11 @@ export class InMemoryRuleRepository implements RuleRepository {
     return { removed, missingIds };
   }
 
-  getAll(type?: RuleType): FirewallRule[] {
+  async getAll(type?: RuleType): Promise<FirewallRule[]> {
     return type ? this.rules.filter((rule) => rule.type === type) : [...this.rules];
   }
 
-  updateStatus(ids: number[], active: boolean): { updated: FirewallRule[]; missingIds: number[] } {
+  async updateStatus(ids: number[], active: boolean): Promise<{ updated: FirewallRule[]; missingIds: number[] }> {
     const idSet = new Set(ids);
     const existingIds = new Set(this.rules.map((rule) => rule.id));
     const missingIds = ids.filter((id) => !existingIds.has(id));

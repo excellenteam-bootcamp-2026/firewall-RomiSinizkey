@@ -11,10 +11,10 @@ export interface RemoveRulesResult {
 export class RemoveRulesUseCase {
   constructor(private readonly repository: RuleRepository) {}
 
-  execute(rawIds: unknown): RemoveRulesResult {
+  async execute(rawIds: unknown): Promise<RemoveRulesResult> {
     assertValidIds(rawIds);
 
-    const { removed, missingIds } = this.repository.removeByIds(rawIds);
+    const { removed, missingIds } = await this.repository.removeByIds(rawIds);
     if (missingIds.length > 0) {
       throw new NotFoundError("RULE_NOT_FOUND", `No rule(s) found for id(s): ${missingIds.join(", ")}.`);
     }

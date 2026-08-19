@@ -34,10 +34,10 @@ describe("RemoveRulesUseCase", () => {
   });
 
   describe("valid ids", () => {
-    it("calls repository.removeByIds exactly once with the exact ids", () => {
-      vi.mocked(repository.removeByIds).mockReturnValue({ removed: [], missingIds: [] });
+    it("calls repository.removeByIds exactly once with the exact ids", async () => {
+      vi.mocked(repository.removeByIds).mockResolvedValue({ removed: [], missingIds: [] });
 
-      useCase.execute([1, 2, 3]);
+      await useCase.execute([1, 2, 3]);
 
       expect(repository.removeByIds).toHaveBeenCalledTimes(1);
       expect(repository.removeByIds).toHaveBeenCalledWith([1, 2, 3]);
@@ -45,26 +45,26 @@ describe("RemoveRulesUseCase", () => {
   });
 
   describe("success (no missing ids)", () => {
-    it("returns exactly { removed, status: 'success' } using the mock's return value", () => {
+    it("returns exactly { removed, status: 'success' } using the mock's return value", async () => {
       const removed: FirewallRule[] = [
         rule({ id: 1, value: "1.1.1.1" }),
         rule({ id: 2, value: "2.2.2.2" }),
       ];
-      vi.mocked(repository.removeByIds).mockReturnValue({ removed, missingIds: [] });
+      vi.mocked(repository.removeByIds).mockResolvedValue({ removed, missingIds: [] });
 
-      const result = useCase.execute([1, 2]);
+      const result = await useCase.execute([1, 2]);
 
       expect(result).toEqual({ removed, status: "success" });
     });
   });
 
   describe("missing ids", () => {
-    it("throws NotFoundError with code RULE_NOT_FOUND, status 404, and the missing id in the message (single id)", () => {
-      vi.mocked(repository.removeByIds).mockReturnValue({ removed: [], missingIds: [42] });
+    it("throws NotFoundError with code RULE_NOT_FOUND, status 404, and the missing id in the message (single id)", async () => {
+      vi.mocked(repository.removeByIds).mockResolvedValue({ removed: [], missingIds: [42] });
 
       let thrown: unknown;
       try {
-        useCase.execute([42]);
+        await useCase.execute([42]);
       } catch (err) {
         thrown = err;
       }
@@ -76,12 +76,12 @@ describe("RemoveRulesUseCase", () => {
       expect(error.message).toContain("42");
     });
 
-    it("throws NotFoundError whose message contains all missing ids (multiple ids)", () => {
-      vi.mocked(repository.removeByIds).mockReturnValue({ removed: [], missingIds: [7, 8, 9] });
+    it("throws NotFoundError whose message contains all missing ids (multiple ids)", async () => {
+      vi.mocked(repository.removeByIds).mockResolvedValue({ removed: [], missingIds: [7, 8, 9] });
 
       let thrown: unknown;
       try {
-        useCase.execute([7, 8, 9]);
+        await useCase.execute([7, 8, 9]);
       } catch (err) {
         thrown = err;
       }
@@ -97,23 +97,23 @@ describe("RemoveRulesUseCase", () => {
   });
 
   describe("invalid ids", () => {
-    it("throws ValidationError for an empty array and does not call repository.removeByIds", () => {
-      expect(() => useCase.execute([])).toThrow(ValidationError);
+    it("throws ValidationError for an empty array and does not call repository.removeByIds", async () => {
+      await expect(useCase.execute([])).rejects.toThrow(ValidationError);
       expect(repository.removeByIds).not.toHaveBeenCalled();
     });
 
-    it("throws ValidationError for a non-array and does not call repository.removeByIds", () => {
-      expect(() => useCase.execute(undefined)).toThrow(ValidationError);
+    it("throws ValidationError for a non-array and does not call repository.removeByIds", async () => {
+      await expect(useCase.execute(undefined)).rejects.toThrow(ValidationError);
       expect(repository.removeByIds).not.toHaveBeenCalled();
     });
 
-    it("throws ValidationError for non-integer entries and does not call repository.removeByIds", () => {
-      expect(() => useCase.execute([1.5])).toThrow(ValidationError);
+    it("throws ValidationError for non-integer entries and does not call repository.removeByIds", async () => {
+      await expect(useCase.execute([1.5])).rejects.toThrow(ValidationError);
       expect(repository.removeByIds).not.toHaveBeenCalled();
     });
 
-    it("throws ValidationError for non-number entries and does not call repository.removeByIds", () => {
-      expect(() => useCase.execute(["1"])).toThrow(ValidationError);
+    it("throws ValidationError for non-number entries and does not call repository.removeByIds", async () => {
+      await expect(useCase.execute(["1"])).rejects.toThrow(ValidationError);
       expect(repository.removeByIds).not.toHaveBeenCalled();
     });
   });
