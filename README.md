@@ -215,24 +215,36 @@ database.
 
 ## PostgreSQL and Drizzle setup
 
-1. **Install PostgreSQL** locally (or have access to a running instance).
-2. **Create the database once**, e.g. via `psql` or a GUI tool:
+1. **Install PostgreSQL** locally (or have access to a running instance). Any reasonably current
+   PostgreSQL version works — nothing in this project depends on a specific server version.
+2. **Create the development database once**, e.g. via `psql` or a GUI tool:
    ```sql
    CREATE DATABASE firewall_dev;
    ```
-3. **DBeaver** (optional) — a free graphical client that can connect to the same PostgreSQL
-   instance for browsing tables and running ad-hoc queries; not required to run the project.
-4. **Configure `.env`** — copy `.env.example` to `.env` and fill in your local database
+3. **Create the isolated test database too**, if you plan to run the PostgreSQL integration tests
+   locally (see "Integration-test-only variables" below) — same server, a second, separate
+   database:
+   ```sql
+   CREATE DATABASE firewall_test;
+   ```
+   **The database itself must exist before running migrations against it** — `npm run db:migrate`
+   applies schema changes inside a database, it does not create the database.
+4. **DBeaver** (optional) — a free graphical client for browsing tables and running ad-hoc SQL
+   queries against the same PostgreSQL instance; it is a database management tool only. **The
+   application itself never goes through DBeaver** — `src/main/startServer.ts` connects straight
+   to PostgreSQL via the `pg` driver (see "Database connection management" below); DBeaver is
+   purely for humans to inspect the database out-of-band.
+5. **Configure `.env`** — copy `.env.example` to `.env` and fill in your local database
    credentials (see "Environment variables" below). `.env` is git-ignored and must never be
    committed.
-5. **Schema and migrations** — the Drizzle schema lives at
+6. **Schema and migrations** — the Drizzle schema lives at
    `src/adapters/outbound/persistence/postgres/schema.ts`; generated SQL migrations and their
    tracking metadata live under `drizzle/`.
-6. **Generate a migration** after changing the schema:
+7. **Generate a migration** after changing the schema:
    ```bash
    npm run db:generate
    ```
-7. **Apply migrations** to your database:
+8. **Apply migrations** to your (already-created) database:
    ```bash
    npm run db:migrate
    ```
@@ -269,6 +281,13 @@ to skip the `DrizzleRuleRepository` integration tests locally.
 | `TEST_DB_USER` | Username for the isolated integration-test database. |
 | `TEST_DB_PASSWORD` | Password for the isolated integration-test database. |
 | `TEST_DB_NAME` | Database name — **must end with `_test`**; the test suite refuses to run (before any migration, cleanup, or query) otherwise, so it can never target `firewall_dev` or any other non-test database. |
+
+**Why the `_test` suffix is enforced:** the integration tests migrate, insert into, and delete
+from whatever database `TEST_DB_NAME` points at. Requiring a `_test` suffix is a cheap,
+mechanical safeguard against a copy-paste or misconfiguration mistake (e.g. accidentally reusing
+`DB_NAME`'s value) that would otherwise let a test run destroy real development or production
+data — the check runs before the test suite does anything else, so a wrong value fails loudly
+instead of silently operating on the wrong database.
 
 ## Database structure
 
@@ -388,7 +407,9 @@ is constructed, the Express app is never built, and `app.listen` is never called
 propagates to `server.ts`'s `.catch()`, which logs the failure and calls `process.exit(1)`: the
 server does not start in a broken, database-less state.
 
-**Shutdown sequence**, triggered by `SIGINT` or `SIGTERM`:
+**Shutdown sequence**, triggered by `SIGINT` (e.g. pressing **Ctrl+C** in the terminal running
+`npm run dev`/`npm start`) or `SIGTERM` (e.g. `kill <pid>`, or how most process managers and
+container runtimes ask a process to stop):
 
 1. An internal flag makes shutdown idempotent — a second signal, or a second manual call, is a
    safe no-op rather than closing anything twice.
@@ -471,6 +492,18 @@ Invoke-RestMethod -Uri "http://localhost:3000/api/firewall/ips" -Method Post -Co
 3. Stop the server and start it again (`npm run dev`).
 4. `GET /api/firewall/rules` — the same rule is still there, because it lives in PostgreSQL, not
    in the process's memory.
+
+## Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `npm run dev` logs `[postgres] connection attempt 1/5 ...` repeatedly, then `connection failed after 5 attempts` and the process exits | **PostgreSQL isn't running**, or is listening on a different host/port than `DB_HOST`/`DB_PORT` | Start your local PostgreSQL service; confirm it's reachable (e.g. `psql -h <DB_HOST> -p <DB_PORT> -U <DB_USER>`); fix `.env` if the host/port is wrong. |
+| Connection attempts fail immediately with an authentication error (e.g. `password authentication failed for user ...`) | **Wrong credentials** — `DB_USER`/`DB_PASSWORD` in `.env` don't match what PostgreSQL actually has configured for that user | Correct `DB_USER`/`DB_PASSWORD` in `.env` (never commit the real value — `.env` is git-ignored). |
+| Connection attempts fail with something like `database "firewall_dev" does not exist` | **The database itself was never created** — `npm run db:migrate` only applies schema *inside* an existing database, it does not create one | `CREATE DATABASE firewall_dev;` (or `firewall_test` for the test DB) via `psql`/DBeaver, then re-run migrations. |
+| The server connects fine, but requests fail with a Postgres error mentioning `relation "firewall_rules" does not exist` | **Migrations were never applied** to this database | Run `npm run db:migrate` against it. |
+| `npm run db:migrate` (or the app's own connection) fails with an SSL-related error (e.g. `the server does not support SSL connections` or the reverse, a certificate error) | **SSL mismatch** between the client and server — most local PostgreSQL installs don't have SSL enabled, but a client may still expect it | This repo already sets `ssl: false` in `drizzle.config.ts` for migrations; the app's own connection (`pg.Pool` in `connection.ts`) also doesn't request SSL. If you're pointing at a remote/cloud database that *requires* SSL, that's a configuration difference from this project's default local setup, not a bug in the app. |
+| Running `psql` directly gives `fe_sendauth: no password supplied` | `psql` prompts for a password interactively; it wasn't provided | Either let `psql` prompt you and type it in, pass `-W`, or set the `PGPASSWORD` environment variable for that one command (avoid putting it in shell history or scripts). |
+| `npm test` shows `17 skipped` and no PostgreSQL integration tests actually ran | **Expected when `TEST_DB_*` isn't configured** — `tests/integration/db/` skips itself by design so `npm test` stays offline-safe by default (see "Environment variables" and "Testing and verification") | To actually run them locally: create `firewall_test` (see "PostgreSQL and Drizzle setup"), set `TEST_DB_*` in your shell or `.env`, and re-run `npm test`. In CI this is already handled — `.github/workflows/ci.yml` provisions an ephemeral PostgreSQL service with these variables pre-set. |
 
 ## Testing and verification
 
