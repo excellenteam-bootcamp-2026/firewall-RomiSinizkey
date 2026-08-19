@@ -312,9 +312,25 @@ successfully), so re-running migrations does not attempt to recreate tables that
 
 - **Singleton** — `PostgresConnection.getInstance()` always returns the same instance; only one
   `pg.Pool` is ever created and reused.
-- **Stop-and-Wait retry** — on connection failure, it waits a fixed interval (from
-  `DB_CONNECTION_INTERVAL`) before trying again, one attempt at a time, up to a bounded
-  `MAX_CONNECTION_ATTEMPTS` (currently 5).
+- **Stop-and-Wait retry with Exponential Backoff** — on connection failure, it waits before
+  trying again, one attempt at a time (never in parallel), up to a bounded
+  `MAX_CONNECTION_ATTEMPTS` (currently 5). The wait is not a fixed interval: it starts at
+  `DB_CONNECTION_INTERVAL` and **doubles after every failed attempt**
+  (`computeBackoffDelayMs(initialDelayMs, failedAttempt) = initialDelayMs * 2^(failedAttempt - 1)`),
+  giving PostgreSQL progressively more time to come up before each retry. The first attempt is
+  always immediate (no delay beforehand), and no delay is scheduled after the final failed
+  attempt. Example with `DB_CONNECTION_INTERVAL=1000`:
+
+  | Attempt | When it happens |
+  |---|---|
+  | 1 | Immediately |
+  | 2 | After waiting 1000 ms |
+  | 3 | After waiting 2000 ms more |
+  | 4 | After waiting 4000 ms more |
+  | 5 | After waiting 8000 ms more |
+
+  Every retry delay is logged (e.g. `retrying in 4000ms (Exponential Backoff)`) so the behavior
+  is observable without reading source code.
 - **Concurrent-call protection** — if `connect()` is called again while a connection attempt is
   already in progress, the second call shares the same in-flight attempt instead of starting a
   parallel one.

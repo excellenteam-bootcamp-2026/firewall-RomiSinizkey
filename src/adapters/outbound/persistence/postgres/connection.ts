@@ -11,6 +11,15 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Exponential Backoff (Issue #33, optional): the delay before retrying a
+// failed attempt doubles each time, starting from DB_CONNECTION_INTERVAL.
+// `failedAttempt` is the 1-based attempt number that just failed, so the
+// first retry (after attempt 1) waits exactly the configured interval, the
+// second retry waits double that, and so on.
+export function computeBackoffDelayMs(initialDelayMs: number, failedAttempt: number): number {
+  return initialDelayMs * 2 ** (failedAttempt - 1);
+}
+
 function connectionLabel(): string {
   return `${config.database.host}:${config.database.port}/${config.database.database}`;
 }
@@ -104,11 +113,12 @@ class PostgresConnection {
           throw new Error(`Failed to connect to PostgreSQL after ${MAX_CONNECTION_ATTEMPTS} attempts.`);
         }
 
+        const delayMs = computeBackoffDelayMs(config.dbConnectionIntervalMs, attempt);
         logger.warn(
-          `[postgres] connection attempt ${attempt} failed, retrying in ${config.dbConnectionIntervalMs}ms`,
+          `[postgres] connection attempt ${attempt} failed, retrying in ${delayMs}ms (Exponential Backoff)`,
         );
         // eslint-disable-next-line no-await-in-loop -- the retry delay must be fully awaited before the next attempt.
-        await sleep(config.dbConnectionIntervalMs);
+        await sleep(delayMs);
       }
     }
 
