@@ -295,3 +295,55 @@ Issue #31 — is now exercised by the live server itself, not only by its own un
   driver mocked so no real database is required to verify the retry logic itself.
 - Exponential Backoff remains optional and is not currently required — the fixed-interval
   Stop-and-Wait behavior is what the requirements call for and what is implemented.
+
+## 11. Issue #32 — Database Documentation and Final Verification (Claude, implemented and verified)
+
+**Objective:** document PostgreSQL/DBeaver/migrations/environment variables/execution steps for
+the completed database integration (Issues #27–#31), then run the full verification suite.
+
+**Gap analysis before editing:** most of this content already existed in `README.md` from
+Issues #27–#31. The genuine gaps were: no explicit statement that DBeaver is only a management
+client (the app connects to PostgreSQL directly); no documented step for creating the isolated
+test database; no stated *reason* for the `TEST_DB_NAME` `_test`-suffix rule; no explicit
+"the database must exist before migrations" warning; no mention of Ctrl+C as the practical way to
+trigger `SIGINT`; and no troubleshooting section at all.
+
+**Documentation added to `README.md`** (targeted additions, no rewrite): a `firewall_test`
+creation step alongside the existing `firewall_dev` one; an explicit DBeaver-is-client-only /
+app-connects-directly clarification; the safety rationale for the `_test` suffix guard; a
+"database must exist before migrations" warning; a Ctrl+C note on the shutdown sequence; and a new
+**Troubleshooting** table covering: PostgreSQL not running, wrong credentials, database not
+created, migrations not applied, SSL mismatch, `psql`'s "no password supplied", and PostgreSQL
+integration tests skipping when `TEST_DB_*` is unset.
+
+**Verification performed:**
+
+```text
+npm run lint  → passed
+npm run build → passed
+npm test (no TEST_DB_* configured) → 171 passed, 17 skipped
+npm test (TEST_DB_* pointed at the isolated firewall_test database) → 17/17 PostgreSQL
+  integration tests passed for real
+npm run db:migrate (against firewall_dev) → applied successfully (idempotent, already up to date)
+```
+
+**Manual database smoke test**, performed against the real `npm run dev` server and the real
+`firewall_dev` database, using a value chosen to be obviously distinguishable from real data: add
+a unique rule via `POST /api/firewall/ports` → read it back via `GET` → confirm the row directly
+in PostgreSQL with a raw query → deactivate it via `PATCH .../status` → delete it via `DELETE` →
+confirm it is gone both via the API and directly in PostgreSQL. The table's one pre-existing row
+was verified untouched before and after. All steps passed.
+
+**A troubleshooting note worth recording as evidence of the verification's rigor:** the first
+attempt at this smoke test produced a genuinely confusing result — a rule added through the API
+was visible in subsequent `GET` responses but not in a direct PostgreSQL query. Rather than
+document an unverified "it works," this was investigated: `netstat` revealed six leftover
+`node.exe` processes from earlier manual-verification sessions in this project (Issues #29–#31)
+that a prior `taskkill` had not fully terminated, likely a stale process answering the HTTP
+requests. All Node processes were killed, a single fresh server was started, and the smoke test
+was re-run cleanly with a consistent, verified result end-to-end. This was an environment/process
+hygiene issue in the local shell session, not a defect in `DrizzleRuleRepository`, `startServer.ts`,
+or any application code.
+
+`AI_CONVERSATION_REPORT.md` (this file) was updated with this section as a pure append, per your
+earlier instruction to never modify prior sections of this report.
