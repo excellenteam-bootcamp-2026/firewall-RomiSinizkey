@@ -1008,3 +1008,80 @@ this issue's completion and the hot-reload fix, without touching any of the six 
 PDFs. Frontend Dockerization remains explicitly out of scope — undocumented as anything other than
 deferred, since no frontend exists in this repository. Course PDFs and `GAP_REPORT.md` were not
 touched. No credentials appear anywhere in this section.
+
+## 20. Issue #55 — Python Service Environment and Structure (Claude, implemented and verified)
+
+**Objective:** stand up `python-rule-service/` with an isolated virtual environment and the exact
+hexagonal folder skeleton from Project 6's approved plan (`Project6-Dockerization-Plan.pdf`,
+§06 "6.1"), so every later Python issue (#56–#61) has a correct place to put code. No configuration,
+logging, domain logic, or database code was added — that is explicitly out of scope for this issue.
+
+**Before editing:** confirmed the branch (`feature/55-python-service-structure`, created from
+`main`); read Issue #55's full body from GitHub; re-read §06 "6.1" of the plan PDF and compared it
+line-for-line against the issue body — no conflict, since the issue body was authored directly from
+that PDF section during board setup. Inspected the existing repository structure (`src/domain`,
+`src/application`, `src/adapters/{inbound,outbound}`, `src/main`), the root `.gitignore`, `README.md`,
+`.github/workflows/ci.yml` (Node-only, no changes needed), and `package.json` before writing anything.
+
+**Structure created**, mirroring the Node service's hexagonal shape but without an inbound adapter
+(this phase only proves the write path via a direct local call, not HTTP):
+
+```
+python-rule-service/
+├── .gitignore              (.venv/, __pycache__/, *.pyc)
+├── README.md               (setup/run only — full architecture docs are Issue #61's job)
+├── requirements.txt        (empty; header comment lists which issue adds which dependency)
+├── src/
+│   ├── __init__.py
+│   ├── domain/__init__.py
+│   ├── application/__init__.py
+│   ├── adapters/__init__.py
+│   ├── adapters/outbound/__init__.py
+│   ├── adapters/outbound/persistence/__init__.py
+│   └── main/
+│       ├── __init__.py
+│       └── __main__.py     (prints a one-line smoke-test confirmation only — no business logic)
+└── tests/
+    ├── unit/.gitkeep
+    ├── integration/.gitkeep
+    └── fixtures/.gitkeep
+```
+
+**Python interpreter choice:** the machine's default `python` resolves to Python 3.9.13, below the
+brief's 3.11+ floor. `py -3.13` (Python 3.13.2, also installed) was used to create the virtual
+environment instead; the README documents this explicitly so a future contributor doesn't
+accidentally build the venv against 3.9.
+
+**Verification performed:**
+- `git add -n python-rule-service/` (dry run, nothing staged) confirmed the tracked file set is
+  exactly the 14 files above (3 root files, 8 Python placeholder files, 3 `.gitkeep` files) —
+  `.venv/` and `__pycache__/` are excluded by the new `python-rule-service/.gitignore`, matching
+  the acceptance criteria exactly.
+- `py -3.13 -m venv .venv` succeeded; activating it resolved `python` to the venv's own
+  interpreter (3.13.2), not the repo-root/system Python — confirmed isolated from both the Node
+  toolchain and the system Python 3.9 install.
+- `pip install -r requirements.txt` succeeded against the empty file.
+- `python -m src.main` ran inside the activated venv and printed
+  `python-rule-service skeleton OK - Python 3.13.2`.
+- `python -m py_compile` on all eight placeholder `.py` files succeeded (no syntax errors).
+- `git check-ignore -v` confirmed `.venv/pyvenv.cfg` and a generated `src/__pycache__/*.pyc` are
+  both matched by the new `.gitignore`.
+
+**Node verification (unchanged toolchain, confirming the existing backend still works):**
+
+```text
+npm run lint   → passed (tsc --noEmit)
+npm run build  → passed (tsc -p tsconfig.json)
+npm test       → 178 passed, 17 skipped, 1 flaky timeout on first full-suite run
+                 (Logger.test.ts "getInstance() always returns the same instance" — a
+                 5000ms Vitest timeout under full-suite load); re-run of that file alone
+                 passed in 550ms, and a second full `npm test` run passed clean
+                 (178 passed, 17 skipped, 0 failed). Pre-existing flakiness, not a
+                 regression — `git status --short` on `src/`, `tests/`, `package.json`,
+                 `vitest.config.mts`, and `tsconfig.json` showed zero changes throughout.
+```
+
+No file under `src/`, `tests/`, `dist/`, or any Node/Docker config was modified. Course PDFs and
+`GAP_REPORT.md` were not touched. Nothing was staged, committed, pushed, or changed on GitHub — all
+work is local, uncommitted changes on `feature/55-python-service-structure`. No credentials appear
+anywhere in this section.
