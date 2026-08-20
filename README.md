@@ -504,6 +504,26 @@ docker run --rm -p 3000:3000 \
 `PORT` is fully configurable at runtime — the app always binds `config.port` from `env.ts`
 regardless of the image's `EXPOSE` default (3000).
 
+### Docker environment files
+
+`.env.dev.example` and `.env.prod.example` are safe, committed templates — placeholder values
+only, no real credentials. The real files Docker reads (`.env.dev`, `.env.prod`) are gitignored
+and created locally, once per clone:
+
+```bash
+cp .env.dev.example .env.dev
+cp .env.prod.example .env.prod
+```
+
+Then edit the two new files with real local/production values. Both templates set `DB_HOST` to
+`postgres` — the assumed PostgreSQL Compose service name, since no `docker-compose.dev.yml`/
+`docker-compose.prod.yml` exists yet (Issues #44/#45); update both the `.env.*` files and the
+eventual compose files together if a different service name is chosen there. Each template also
+sets `POSTGRES_USER`/`POSTGRES_PASSWORD`/`POSTGRES_DB` (read by the official `postgres` image
+itself, not by this app) equal to the matching `DB_USER`/`DB_PASSWORD`/`DB_NAME`, so the backend
+and the database container are configured from one source of truth. The existing `.env.example`
+is unaffected and still describes the plain, non-Docker `npm run dev` workflow (`DB_HOST=localhost`).
+
 ## Manual API testing
 
 With the server running (default `http://localhost:3000`):
