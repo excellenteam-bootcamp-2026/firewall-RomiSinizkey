@@ -470,6 +470,40 @@ npm run dev
 - `npm start` — run the compiled server (`node dist/main/server.js`).
 - `npm run lint` — type-check without emitting.
 
+## Docker
+
+The backend has a multi-stage `Dockerfile` with three targets. No database credentials are
+baked into the image at any stage — they're supplied at container-start time (env files land in
+Issue #43; Compose wiring in Issues #44/#45).
+
+- **`development`** — full dependency tree, runs `npm run dev` (`ts-node-dev`, hot reload).
+  Intended to run with the repository bind-mounted over `/app`.
+- **`build`** — compiles TypeScript to `dist/`; not run directly, only used as a source for the
+  `production` stage below.
+- **`production`** — a fresh base with `npm ci --omit=dev`, so devDependencies (`drizzle-kit`,
+  `typescript`, `ts-node-dev`, `vitest`, ...) are never present. Runs as a non-root user. On
+  start, `npm run start:container` first runs the compiled migration runner
+  (`node dist/main/migrate.js`, built from `src/main/migrate.ts` on
+  `drizzle-orm/node-postgres/migrator` — **not** `drizzle-kit`, which this image doesn't have),
+  then `node dist/main/server.js`; a failed migration stops the container before the server
+  starts.
+
+Standalone build/run (no Compose yet):
+
+```bash
+docker build --target development -t firewall-backend:dev .
+docker build --target production  -t firewall-backend:prod .
+
+docker run --rm -p 3000:3000 \
+  -e ENV=dev -e PORT=3000 -e DB_CONNECTION_INTERVAL=2000 \
+  -e DB_HOST=host.docker.internal -e DB_PORT=5432 \
+  -e DB_USER=postgres -e DB_PASSWORD=change_me -e DB_NAME=firewall_dev \
+  firewall-backend:dev
+```
+
+`PORT` is fully configurable at runtime — the app always binds `config.port` from `env.ts`
+regardless of the image's `EXPOSE` default (3000).
+
 ## Manual API testing
 
 With the server running (default `http://localhost:3000`):
