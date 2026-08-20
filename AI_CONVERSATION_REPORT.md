@@ -656,3 +656,73 @@ were left running.
 
 No Compose files (Issues #44/#45) or Project 4 env files (Issue #43) were added — out of scope by
 the issue's own instructions. Course PDFs and `GAP_REPORT.md` were not touched.
+
+## 16. Issue #43 — Backend Dev/Prod/Example Environment Files (Claude, implemented and verified)
+
+**Objective:** safe, committed `.env.dev.example`/`.env.prod.example` templates for the Docker
+path, with the real, credential-bearing files created locally and gitignored — the design already
+recorded in this report's §04/§13/§14.
+
+**Inspection before editing:** `.env.example`, `.gitignore`, `src/main/env.ts`, `Dockerfile`,
+`package.json`, and the README's existing Docker section were read first. No conflicts were found:
+`env.ts`'s Zod schema already validates exactly the 8 required app variables and needed no
+changes — the three `POSTGRES_*` variables are consumed by the official `postgres` image itself,
+never read by this Node app, so they intentionally stay outside `envSchema`. The `Dockerfile`
+needed no changes either — it already receives every variable at container-start time via
+`env_file`/`-e`, with nothing hardcoded.
+
+**Compose service name assumption:** no `docker-compose.dev.yml`/`docker-compose.prod.yml` exists
+yet (Issues #44/#45), and a search of this report and the README turned up no prior decision on a
+literal PostgreSQL service name — only the generic phrase "the Compose Postgres service name." Per
+the issue's own instruction for exactly this case, `postgres` was used for `DB_HOST` in both
+templates, and is flagged here as an assumption: Issues #44/#45 must either name their `postgres`
+service `postgres`, or these two files (and the README section documenting them) need updating to
+match whatever name is chosen.
+
+**Implementation:**
+
+- New `.env.dev.example` / `.env.prod.example` — all 8 app variables (`ENV`, `PORT`,
+  `DB_CONNECTION_INTERVAL`, `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`) plus the 3
+  PostgreSQL container variables (`POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`), each kept
+  byte-for-byte equal to its `DB_*` counterpart. Dev uses `firewall_dev`/`change_me`; prod uses a
+  separate `firewall_prod` database name and an explicit `CHANGE_ME_BEFORE_DEPLOY` placeholder to
+  signal it must not ship as-is. Both files are heavily commented in place, explaining the
+  `DB_HOST` choice, the assumption above, and the `POSTGRES_*` mapping — no real credentials
+  anywhere in either file.
+- `.gitignore` — `.env` replaced with `.env` + `.env.*`, then `!.env.example` and
+  `!.env.*.example` negations re-include every template (existing and new) while every real env
+  file (`.env`, `.env.dev`, `.env.prod`, and any future `.env.X`) stays ignored.
+- `README.md` — new "Docker environment files" subsection under the existing Docker section,
+  documenting the two `cp` commands, the service-name assumption, and the `POSTGRES_*` mapping.
+  The pre-existing `.env.example`/non-Docker workflow section is untouched.
+
+**Verification:**
+
+```text
+npm run lint  → passed
+npm run build → passed
+npm test      → 178 passed, 17 skipped
+```
+
+**Ignore-rule verification**, via `git status --short --ignored=matching` (more reliable here than
+`git check-ignore`'s exit code, which reported a false positive for negated patterns in this git
+version — the negation was confirmed working by every actual-file-status check):
+
+```text
+.env              → !! ignored
+.env.dev          → !! ignored   (probed with a temporary empty file, removed immediately after)
+.env.prod         → !! ignored   (same)
+.env.example      → ?? tracked/trackable, not ignored
+.env.dev.example  → ?? tracked/trackable, not ignored
+.env.prod.example → ?? tracked/trackable, not ignored
+```
+
+**Variable and secret checks:** a script confirmed all 11 required variables
+(8 app + 3 `POSTGRES_*`) are present in both templates; confirmed `DB_USER`/`POSTGRES_USER`,
+`DB_PASSWORD`/`POSTGRES_PASSWORD`, and `DB_NAME`/`POSTGRES_DB` are identical within each file; and
+confirmed neither template contains the real local `DB_PASSWORD` value from the repository's own
+gitignored `.env` (compared programmatically, never printed).
+
+No Docker Compose files were added (Issues #44/#45), `env.ts` was not modified, and the
+`Dockerfile` was not modified — none of the three "only if a proven problem requires it" escape
+hatches in this issue were triggered. Course PDFs and `GAP_REPORT.md` were not touched.
