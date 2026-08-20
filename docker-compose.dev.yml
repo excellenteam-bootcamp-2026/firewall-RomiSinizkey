@@ -1,0 +1,55 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      # Published for local tools (DBeaver) — this is the dev-only convenience;
+      # the prod compose file (Issue #45) must not publish this port.
+      - "5432:5432"
+    volumes:
+      - postgres_data_dev:/var/lib/postgresql/data
+    healthcheck:
+      # $$ (not $) escapes Compose's own interpolation, so this is expanded by
+      # the shell *inside* the postgres container against its own environment
+      # at healthcheck time, not baked in as a static string at `up` time.
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      target: development
+    env_file:
+      - .env.dev
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        # Waits for the postgres healthcheck above, not just for the postgres
+        # container to have started — plain `depends_on` only guarantees the
+        # latter, which is not the same as PostgreSQL being ready to accept
+        # connections.
+        condition: service_healthy
+    volumes:
+      # Bind-mounts the repo over /app for hot reload...
+      - .:/app
+      # ...then this second, more specific mount shadows just /app/node_modules
+      # with a named volume, so the host's node_modules (if any, and possibly
+      # built for the wrong OS/arch) never overwrites the image's own
+      # container-native node_modules underneath the bind mount.
+      - backend_node_modules:/app/node_modules
+    # The development Dockerfile stage's own CMD is bare `npm run dev` — it
+    # does not run migrations. This override runs the source-based migration
+    # runner first (db:migrate:dev, via ts-node — the compiled dist/main/migrate.js
+    # doesn't exist in this stage, since "development" never runs `npm run build`),
+    # then hands off to the normal hot-reload dev server.
+    command: sh -c "npm run db:migrate:dev && npm run dev"
+
+volumes:
+  postgres_data_dev:
+  backend_node_modules:
