@@ -545,6 +545,31 @@ host's `node_modules` never overwrites the image's own. On start, the backend co
 runs `npm run build`, so the compiled `dist/main/migrate.js` used in production doesn't exist
 here) before handing off to `npm run dev`.
 
+### Production Compose
+
+```bash
+cp .env.prod.example .env.prod   # first time only, then replace every placeholder with a real value
+
+docker compose --env-file .env.prod -f docker-compose.prod.yml up --build -d
+docker compose --env-file .env.prod -f docker-compose.prod.yml down   # stops; keeps the DB volume
+```
+
+Same healthcheck-gated startup as development, but everything else is deliberately different:
+
+| | Development | Production |
+|---|---|---|
+| Dockerfile target | `development` | `production` |
+| Source code | Bind-mounted, hot reload | Baked into the image at build time, no bind mount |
+| Migrations | `npm run db:migrate:dev` (`ts-node`, Compose `command:` override) | The image's own default `CMD` (`npm run start:container` → compiled `dist/main/migrate.js`, then `dist/main/server.js`) — no override needed |
+| Container user | root (image default) | non-root `app` (Issue #42) |
+| PostgreSQL port on host | `5432` published, for DBeaver | **Not published** — only reachable from the `backend` container, over the Compose network |
+| Database volume | `postgres_data_dev` | `postgres_data_prod` (fully separate; a prod-mode run can never see dev data) |
+| Restart policy | none set | `unless-stopped` on both services |
+
+`.env.prod` is created locally the same way as `.env.dev` — copied from the committed
+`.env.prod.example` template and never committed itself. Confirm no real production credential is
+ever placed in a tracked file before deploying with it.
+
 ## Manual API testing
 
 With the server running (default `http://localhost:3000`):
