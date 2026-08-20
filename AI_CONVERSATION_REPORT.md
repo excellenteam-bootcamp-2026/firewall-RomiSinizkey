@@ -421,3 +421,157 @@ since been root-caused and fixed, and `npm test` is no longer flaky.*
 - **Verification:** the standard `npm test` command (no flags) passed **10 consecutive times**
   after the fix. Re-run once more with `TEST_DB_*` pointed at the isolated `firewall_test`
   database: **all 192 tests passed**, including the 17 real-PostgreSQL integration tests.
+
+## 13. Project 4 — Dockerization Planning and Board Setup
+
+**Objective:** plan the Dockerization of the Firewall Orchestrator (Project 4) against the current
+repository state, resolve several correctness gaps in the initial plan, and set up the GitHub Epic
+and implementation issues — without touching any repository files.
+
+### Requirement analysis
+
+The Project 4 PDF was reviewed collaboratively with ChatGPT and Claude. The assignment requests
+Dockerization of a frontend, a backend, and PostgreSQL, connected through Docker Compose.
+Repository inspection (source tree, `package.json`, `.github/workflows/ci.yml`, README) confirmed
+that this repository currently contains only the backend — no frontend source, framework,
+package, port, or build configuration exists anywhere in it. The resulting decision was to
+implement only the components that actually exist: the backend and PostgreSQL. Frontend
+Dockerization remains explicitly deferred in the Epic, rather than being invented or silently
+dropped from scope.
+
+### Technical decisions
+
+- Multi-stage backend Dockerfile with separate `development` and `production` targets, plus a
+  `.dockerignore`.
+- New `GET /health` endpoint for container liveness checks (no database dependency in the request
+  path).
+- PostgreSQL `healthcheck` plus `depends_on: condition: service_healthy` on the backend service —
+  plain `depends_on` only waits for container start, not for PostgreSQL to accept connections.
+- `DB_HOST` set to the PostgreSQL Compose service name, not `localhost`, inside container-context
+  env files.
+- Separate named persistent volumes for development and production, so a local production-mode
+  run can never share state with development data.
+- PostgreSQL port 5432 published to the host in development (for DBeaver), not published in
+  production.
+- `.env.dev`, `.env.prod`, and `.env.example` as the three backend env files; the PDF's `env.dev`
+  spelling (no leading dot) was treated as an apparent typo, not a deliberate distinction, and
+  recorded as such rather than silently corrected without comment.
+- Safe `.env.dev.example` / `.env.prod.example` templates committed to the repository, with the
+  real, credential-bearing `.env.dev` / `.env.prod` files created locally per clone and gitignored
+  — so the setup stays reproducible without ever committing a real password.
+- Separate `docker-compose.dev.yml` and `docker-compose.prod.yml` files, rather than a generic
+  base file or a base-plus-override pair.
+- Docker Desktop installation and startup treated as an Epic checklist prerequisite, not a
+  separate implementation issue — a deliberate, noted departure from the Project 3 precedent
+  (Issue #26), where local PostgreSQL/DBeaver installation was filed as its own issue.
+
+### Migration correction
+
+The initial plan proposed running `npm run db:migrate` inside the production container's
+entrypoint. AI-assisted review identified that this would fail: that script invokes `drizzle-kit`,
+which is a devDependency and is not present in a production-only image build. The corrected
+design instead adds a compiled application migration runner, `src/main/migrate.ts`, built on
+`drizzle-orm/node-postgres/migrator` and reusing the existing production `pg`/`drizzle-orm`
+dependencies. The Docker startup sequence runs `dist/main/migrate.js` before `dist/main/server.js`
+in both the development and production stages, with a failed migration required to stop container
+startup rather than continue against a mismatched schema. The existing non-Docker workflow
+(`npm run db:migrate`, run manually on the host) remains unchanged.
+
+### Compose environment correction
+
+A second gap was found in the initial Compose plan: the backend's own environment schema expects
+`DB_USER`, `DB_PASSWORD`, and `DB_NAME`, while the official PostgreSQL image expects
+`POSTGRES_USER`, `POSTGRES_PASSWORD`, and `POSTGRES_DB`. The corrected Compose design explicitly
+maps the former onto the latter in the `postgres` service's `environment:` block, and documents
+launching each environment with its matching `--env-file` (e.g.
+`docker compose --env-file .env.dev -f docker-compose.dev.yml up --build`) so the substitution
+resolves from the same file the backend already reads via `env_file`.
+
+### GitHub planning results
+
+- Epic **#47** — *Project 4: Dockerize the Backend and PostgreSQL (Frontend Deferred)* — was
+  created, with Docker Desktop start-up recorded as a checklist precondition and frontend work
+  recorded as explicitly deferred scope, not as a child issue.
+- Six native GitHub sub-issues of #47 were created, each carrying the objective, dependencies, and
+  acceptance criteria from the approved plan:
+  - #41 — Health endpoint (2 points)
+  - #42 — Backend Dockerfile (5 points)
+  - #43 — Environment files (2 points)
+  - #44 — Development Compose (5 points)
+  - #45 — Production Compose (3 points)
+  - #46 — Documentation and smoke test (3 points)
+- Total ready estimate: **20 Story Points**, with the Epic itself left unpointed, matching the
+  convention already used for the Project 3 epic (#25).
+- All items were added to the Student Firewall Project board with a `docker` label applied to the
+  Epic and every Docker-related issue. Epic #47 and Issue #41 are `In Progress`; Issues #42–#46 are
+  `Backlog`.
+- A "Project 4 — Dockerization" milestone was created and assigned to the Epic and all six
+  implementation issues.
+- Native parent/sub-issue relationships and the full dependency chain (#41 → #42 → #43/#44 → #45 →
+  #46) were verified by reading them back from GitHub, not assumed.
+- The GitHub API refused to configure the board's empty Priority field (its options had been
+  removed at some point after the board's original setup), reporting it as a field that must be
+  updated through channels other than the standard Projects field API. Manual configuration
+  through the GitHub UI was required for this one field; every other field was set and verified
+  through the API.
+- No frontend issue was created, consistent with the deferred-scope decision above.
+
+### Docker prerequisite observation
+
+`docker version` showed the Docker client was installed but the Docker engine was not running;
+`docker compose version` succeeded independently. Starting Docker Desktop and re-verifying both
+the Docker client and server was recorded as the next prerequisite check before implementation
+work begins.
+
+## 14. Issue #41 — Health Check Endpoint (Claude, implemented and verified)
+
+**Objective:** add a lightweight `GET /health` liveness endpoint, mounted outside `/api/firewall`,
+with no PostgreSQL/repository/use-case dependency, as planning prerequisite for the Docker
+`HEALTHCHECK`/Compose `service_healthy` work in later Project 4 issues.
+
+**Inspection before editing:** `app.ts`, `firewallController.ts` (for the existing
+`createXRouter()` convention), `errorHandler.ts`/`notFoundHandler`, and the existing
+`firewallApi.test.ts` Supertest suite were read first, to mount the new route consistently and
+confirm nothing about the existing 404/error behavior needed to change.
+
+**Implementation:**
+
+- New `src/adapters/inbound/http/controllers/healthController.ts` — `createHealthRouter()`,
+  mirroring the existing `createFirewallRouter()` pattern but with no constructor dependencies,
+  since a liveness check has nothing to inject.
+- `src/adapters/inbound/http/app.ts` — mounts `app.use("/health", createHealthRouter())` **before**
+  `/api/firewall`, independent of the `repository` parameter `createApp()` receives, so `/health`
+  cannot reach PostgreSQL even indirectly.
+- No changes to `firewallController.ts`, `errorHandler.ts`, `notFoundHandler`, or any existing
+  route — `/api/firewall/*` behavior and the 404/error JSON shape are unchanged.
+
+**Tests** (`tests/integration/http/healthApi.test.ts`, new file, separate from
+`firewallApi.test.ts`): exact `200 {"status":"ok"}` response; a `vi.spyOn` on
+`InMemoryRuleRepository.getAll` proving `/health` never calls into the repository even though
+`createApp()` requires one to be constructed; and a confirmation that unknown routes still return
+the existing `404 NOT_FOUND` shape alongside the new route.
+
+**Verification:**
+
+```text
+npm run lint  → passed
+npm run build → passed
+npm test      → 178 passed, 17 skipped (13 test files + 1 skipped; 3 new health tests included)
+```
+
+One `npm test` run hit an unrelated, pre-existing flake (`Logger.test.ts`'s Singleton test timing
+out on first cold import — the same class of resource-contention issue diagnosed in §12, this time
+landing on a different file). A clean re-run passed all 178 tests; nothing about this issue's
+changes was implicated.
+
+**Manual verification**, `npm run dev` against the real `firewall_dev` database: `GET /health` →
+`200 {"status":"ok"}`; `GET /api/firewall/rules` still `200` with existing data; `GET
+/does-not-exist` still `404 NOT_FOUND` — confirming the new route sits alongside existing behavior
+without changing it. The dev server process (and its `ts-node-dev` child) was located by command
+line and stopped afterward; a follow-up request to `/health` confirmed the port was no longer
+listening, avoiding the stale-process issue previously recorded in §11.
+
+`README.md` was updated: the "API endpoints" intro now distinguishes the `/api/firewall`-mounted
+rule routes from the root-mounted `/health` route, and a new `### GET /health` subsection documents
+the liveness-only contract (no database dependency, intended for container health checks — not
+database readiness).
