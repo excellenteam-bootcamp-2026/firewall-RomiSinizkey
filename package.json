@@ -10,7 +10,9 @@
     "lint": "tsc --noEmit",
     "test": "vitest run",
     "db:generate": "drizzle-kit generate",
-    "db:migrate": "drizzle-kit migrate"
+    "db:migrate": "drizzle-kit migrate",
+    "db:migrate:compiled": "node dist/main/migrate.js",
+    "start:container": "npm run db:migrate:compiled && node dist/main/server.js"
   },
   "license": "MIT",
   "dependencies": {

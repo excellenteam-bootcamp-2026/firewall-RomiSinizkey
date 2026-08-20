@@ -575,3 +575,84 @@ listening, avoiding the stale-process issue previously recorded in §11.
 rule routes from the root-mounted `/health` route, and a new `### GET /health` subsection documents
 the liveness-only contract (no database dependency, intended for container health checks — not
 database readiness).
+
+## 15. Issue #42 — Backend Dockerfile with Dev/Prod Stages (Claude, implemented and verified)
+
+**Objective:** a multi-stage `Dockerfile` and `.dockerignore` for the backend, plus a
+production-safe, drizzle-kit-free migration runner that the container runs before starting the
+server — the corrected design already recorded in this report's §04/§13/§14.
+
+**Inspection before editing:** `package.json`, `tsconfig.json`, `src/main/server.ts`,
+`src/main/startServer.ts`, `drizzle.config.ts`, the `drizzle/` migrations folder, `.gitignore`,
+and `src/main/env.ts` were read first. Key findings that shaped the implementation:
+`tsconfig.json`'s `rootDir` is `src`, so the new migration runner had to live under `src/main/`
+to be compiled by the existing `npm run build`; `drizzle.config.ts`'s `out: "./drizzle"` and the
+migrations folder are both resolved relative to the process's working directory, not any fixed
+absolute path, so the compiled runner could reuse the identical `"./drizzle"` convention. No
+conflicts were found between the issue's requirements and the existing structure.
+
+**Implementation:**
+
+- New `src/main/migrate.ts` — opens its own short-lived `pg.Pool` (mirroring `connection.ts`'s
+  config shape), runs `drizzle-orm/node-postgres/migrator`'s `migrate()` against `./drizzle`, and
+  always closes that pool in a `finally` block. A failed migration exits the process with a
+  non-zero code; nothing here touches the app's long-lived Singleton pool.
+- `package.json` — two new scripts: `db:migrate:compiled` (`node dist/main/migrate.js`) and
+  `start:container` (`npm run db:migrate:compiled && node dist/main/server.js`), the latter is
+  the production container's entrypoint command. All five pre-existing scripts (`dev`, `build`,
+  `start`, `lint`, `test`, `db:migrate`) are untouched.
+- New `Dockerfile`, four stages: `deps` (shared `npm ci`, full dependency tree) → `development`
+  (`npm run dev`, intended to run with the repo bind-mounted over `/app`) and, separately,
+  `build` (`npm run build`) → `production` (fresh `node:24-alpine` base, `npm ci --omit=dev`,
+  copies only `dist/` and `drizzle/` from `build`, non-root user, `HEALTHCHECK` against the
+  Issue #41 `/health` route, `CMD ["npm", "run", "start:container"]`). No database credentials
+  are set anywhere in the file — only structural `ENV`/`ARG` (`NODE_ENV`, `PORT`, default 3000,
+  fully overridable at container-run time).
+- New `.dockerignore` — excludes `node_modules`, `dist`, `.git`/`.gitignore`, `coverage`, `.env`
+  and `.env.*`, `*.log`, editor/OS files, and course PDFs/`GAP_REPORT.md`/this report.
+
+**A real bug found and fixed during manual verification, not just documented:** the first
+production-image run against a real database succeeded functionally but silently lost its
+intended logging — `docker logs` showed Winston failing to initialize with `EACCES: permission
+denied, mkdir '/app/logs'` and falling back to native console output. Root cause: `Logger.ts`
+(pre-existing, Issue #15) writes to `<CWD>/logs/app.log` via a Winston `File` transport in
+production mode and creates that directory itself on first write — but the production stage's
+non-root `app` user didn't own `/app`, so the `mkdir` failed. This was a conflict introduced by
+this issue's own non-root hardening, not a pre-existing bug or a conflict with the issue's stated
+requirements. Fixed by creating `/app/logs` and `chown -R app:app /app` in the same `RUN` step
+that creates the user, before the `USER app` switch — no change to `Logger.ts` or any other
+application code.
+
+**Verification:**
+
+```text
+npm run lint  → passed
+npm run build → passed (dist/main/migrate.js compiled)
+npm test      → 178 passed, 17 skipped
+docker build --target development -t firewall-backend:dev  . → succeeded
+docker build --target production  -t firewall-backend:prod . → succeeded
+```
+
+**Production image dependency audit:** `docker run --rm firewall-backend:prod sh -c "ls
+node_modules"` confirmed `drizzle-kit`, `typescript`, `ts-node-dev`, `vitest`, `supertest`, and
+all four `@types/*` devDependencies are absent, while `express`, `pg`, `drizzle-orm`, `winston`,
+`zod`, and `dotenv` are present; `whoami` inside the container returned the non-root `app` user.
+
+**Manual verification**, both against the real `firewall_dev` database via
+`DB_HOST=host.docker.internal`:
+
+- **Development image:** `docker run` with explicit `-e` vars (no compose yet) → connected to
+  PostgreSQL, `GET http://localhost:3000/health` → `200 {"status":"ok"}`, and Docker's own
+  `HEALTHCHECK` independently reported the container `healthy`.
+- **Production image** (beyond what this issue strictly required, to actually prove "migrations
+  run before the server starts" rather than just assert it): after the logging fix above, the
+  container's own log file was read back with `docker exec ... cat /app/logs/app.log` and showed
+  the exact required order — `"[migrate] running database migrations..."` →
+  `"[migrate] migrations complete"` → PostgreSQL connection established → `"listening on port
+  3000"` — before any HTTP request was ever made.
+
+Both verification containers were stopped and removed afterward; `docker ps -a` confirmed none
+were left running.
+
+No Compose files (Issues #44/#45) or Project 4 env files (Issue #43) were added — out of scope by
+the issue's own instructions. Course PDFs and `GAP_REPORT.md` were not touched.

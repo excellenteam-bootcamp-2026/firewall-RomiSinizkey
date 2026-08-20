@@ -1,0 +1,27 @@
+# Dependencies and build output — reinstalled/rebuilt inside the image
+node_modules
+dist
+
+# Git metadata
+.git
+.gitignore
+
+# Test/coverage output
+coverage
+
+# Local environment files and secrets — never baked into an image.
+# (.env.*.example templates, added in Issue #43, stay excluded from this negation on
+# purpose; they're safe placeholders but the image doesn't need them either.)
+.env
+.env.*
+
+# Logs and OS/editor artifacts
+*.log
+.DS_Store
+.vscode
+.idea
+
+# Course PDFs and local reports — not part of the application
+*.pdf
+GAP_REPORT.md
+AI_CONVERSATION_REPORT.md
