@@ -473,8 +473,8 @@ npm run dev
 ## Docker
 
 The backend has a multi-stage `Dockerfile` with three targets. No database credentials are
-baked into the image at any stage — they're supplied at container-start time (env files land in
-Issue #43; Compose wiring in Issues #44/#45).
+baked into the image at any stage — they're supplied at container-start time via the env files
+below, and via Compose (development: this section; production: Issue #45).
 
 - **`development`** — full dependency tree, runs `npm run dev` (`ts-node-dev`, hot reload).
   Intended to run with the repository bind-mounted over `/app`.
@@ -488,7 +488,7 @@ Issue #43; Compose wiring in Issues #44/#45).
   then `node dist/main/server.js`; a failed migration stops the container before the server
   starts.
 
-Standalone build/run (no Compose yet):
+Standalone build/run (without Compose — see "Development Compose" below for the normal workflow):
 
 ```bash
 docker build --target development -t firewall-backend:dev .
@@ -516,13 +516,34 @@ cp .env.prod.example .env.prod
 ```
 
 Then edit the two new files with real local/production values. Both templates set `DB_HOST` to
-`postgres` — the assumed PostgreSQL Compose service name, since no `docker-compose.dev.yml`/
-`docker-compose.prod.yml` exists yet (Issues #44/#45); update both the `.env.*` files and the
-eventual compose files together if a different service name is chosen there. Each template also
-sets `POSTGRES_USER`/`POSTGRES_PASSWORD`/`POSTGRES_DB` (read by the official `postgres` image
-itself, not by this app) equal to the matching `DB_USER`/`DB_PASSWORD`/`DB_NAME`, so the backend
-and the database container are configured from one source of truth. The existing `.env.example`
-is unaffected and still describes the plain, non-Docker `npm run dev` workflow (`DB_HOST=localhost`).
+`postgres` — the PostgreSQL Compose service name, confirmed by `docker-compose.dev.yml` below
+(Issue #45's production file uses the same name). Each template also sets
+`POSTGRES_USER`/`POSTGRES_PASSWORD`/`POSTGRES_DB` (read by the official `postgres` image itself,
+not by this app) equal to the matching `DB_USER`/`DB_PASSWORD`/`DB_NAME`, so the backend and the
+database container are configured from one source of truth. The existing `.env.example` is
+unaffected and still describes the plain, non-Docker `npm run dev` workflow (`DB_HOST=localhost`).
+
+### Development Compose
+
+`docker-compose.dev.yml` runs the backend and PostgreSQL together with one command — hot reload,
+migrations-before-server, a persistent database volume, and port 5432 published for DBeaver:
+
+```bash
+cp .env.dev.example .env.dev   # first time only
+
+docker compose --env-file .env.dev -f docker-compose.dev.yml up --build -d
+docker compose --env-file .env.dev -f docker-compose.dev.yml logs -f backend
+docker compose --env-file .env.dev -f docker-compose.dev.yml down   # stops; keeps the DB volume
+```
+
+`postgres` has a `pg_isready` healthcheck; `backend` waits for it via
+`depends_on: condition: service_healthy` (not plain `depends_on`, which only waits for the
+container to start, not for PostgreSQL to accept connections). The repository is bind-mounted
+over `/app` for hot reload, with a separate named volume shadowing just `/app/node_modules` so the
+host's `node_modules` never overwrites the image's own. On start, the backend container runs
+`npm run db:migrate:dev` (source-based, via `ts-node` — the `development` Dockerfile stage never
+runs `npm run build`, so the compiled `dist/main/migrate.js` used in production doesn't exist
+here) before handing off to `npm run dev`.
 
 ## Manual API testing
 

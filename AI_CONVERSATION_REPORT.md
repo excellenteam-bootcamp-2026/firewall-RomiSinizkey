@@ -726,3 +726,98 @@ gitignored `.env` (compared programmatically, never printed).
 No Docker Compose files were added (Issues #44/#45), `env.ts` was not modified, and the
 `Dockerfile` was not modified — none of the three "only if a proven problem requires it" escape
 hatches in this issue were triggered. Course PDFs and `GAP_REPORT.md` were not touched.
+
+## 17. Issue #44 — docker-compose.dev.yml (Claude, implemented and verified)
+
+**Objective:** run the backend and PostgreSQL together with one command in development — service
+naming, healthcheck-gated startup, a persistent volume, and migrations-before-server, per the
+design already recorded in this report's §04/§13/§14/§16.
+
+**Inspection before editing:** `Dockerfile`, `package.json`, `src/main/migrate.ts`,
+`src/main/startServer.ts`, `src/main/env.ts`, `.env.dev.example`, `.dockerignore`, and
+`.gitignore` were read first. Confirmed `.env.dev.example` already carries both the app's `DB_*`
+keys and the `POSTGRES_*` keys (added Issue #43, kept pre-equal), so the compose file could
+substitute `POSTGRES_*` directly rather than remapping from `DB_*` again.
+
+**A real gap found by inspection, not assumed:** the `development` Dockerfile stage's `CMD` is
+bare `npm run dev` — it never ran migrations, contradicting what earlier planning docs (§04/§14)
+assumed it would do. Root cause: that stage never runs `npm run build`, so the compiled
+`dist/main/migrate.js` used by the production entrypoint doesn't exist there, and nothing else
+was wired in its place during Issue #42. Fixed at the Compose layer, not the Dockerfile: a new
+source-based script, `db:migrate:dev` (`ts-node src/main/migrate.ts` — `ts-node` confirmed
+available as a hoisted dependency of `ts-node-dev`), plus a `command:` override on the `backend`
+service that runs it before handing off to `npm run dev`. The `Dockerfile` itself was **not**
+modified — the existing `development` stage still builds and works standalone (Issue #42), and
+the migration step is Compose's concern, since only Compose knows a database will be reachable at
+that point.
+
+**Implementation** (`docker-compose.dev.yml`, new):
+
+- `postgres` service: official `postgres:16` image (matching `.github/workflows/ci.yml`'s CI
+  service), `environment` sourced from `${POSTGRES_USER}`/`${POSTGRES_PASSWORD}`/`${POSTGRES_DB}`,
+  a named volume `postgres_data_dev:/var/lib/postgresql/data`, port `5432` published for DBeaver,
+  and a `pg_isready` healthcheck using `$$POSTGRES_USER`/`$$POSTGRES_DB` — the doubled `$$` is
+  deliberate: it escapes Compose's own `${...}` interpolation so the shell *inside* the postgres
+  container expands those against its actual runtime environment, not a value frozen at `up` time.
+- `backend` service: builds the `development` target, `env_file: .env.dev` (which already sets
+  `DB_HOST=postgres`, confirming Issue #43's assumed service name was correct), port `3000`
+  published, `depends_on: postgres: condition: service_healthy`, the repo bind-mounted over
+  `/app` for hot reload with a second, named-volume mount at `/app/node_modules` specifically to
+  stop that bind mount from shadowing the image's own (container-native) `node_modules`, and the
+  `command:` override described above.
+- `package.json` — one new script, `db:migrate:dev`. No other scripts changed.
+- `README.md` — new "Development Compose" subsection with the up/logs/down commands and a short
+  explanation of the healthcheck gate, bind-mount/node_modules handling, and migration step;
+  updated two now-stale "no Compose yet" references elsewhere in the existing Docker section; the
+  `.env.dev.example` assumption note was tightened from "assumed" to "confirmed," since this issue
+  is what actually decided the `postgres` service name.
+
+**Verification:**
+
+```text
+docker compose --env-file .env.dev -f docker-compose.dev.yml config → valid, all substitutions
+  resolved correctly; $$POSTGRES_USER/$$POSTGRES_DB preserved literally (not pre-substituted)
+docker compose --env-file .env.dev -f docker-compose.dev.yml up --build -d → both services
+  created; postgres reported Healthy before backend started (proving the depends_on gate)
+```
+
+Backend container log, confirming migration order: `db:migrate:dev` → `"[migrate] migrations
+complete"` → **then** `ts-node-dev` starts → PostgreSQL connection established → listening on
+port 3000 — migrations complete before the dev server starts, exactly as required.
+
+**Functional smoke test:** `GET /health` → `200 {"status":"ok"}`. Inserted an IP rule through
+`POST /api/firewall/ips`; confirmed it via `GET /api/firewall/rules` and, independently, with
+`docker exec ... psql -c "SELECT ... FROM firewall_rules"` run directly inside the `postgres`
+container — the row was present both ways. Ran `docker compose down` (no `-v`) and confirmed both
+named volumes survived (`docker volume ls`); brought the stack back up and confirmed the same rule
+was still there via the API — proving the named volume, not the container, is what's holding the
+data.
+
+**A genuine environment finding, reported rather than silently worked around:** step 9's "verify
+PostgreSQL is reachable from DBeaver through `localhost:5432`" could not be cleanly confirmed on
+this machine. A native (non-Docker) PostgreSQL server was already running locally — the same one
+used for manual verification in Issues #41–#43 — and already bound to host port `5432`. A
+host-side connection attempt using the Compose password reached that native server instead (wrong
+password error, then confirmed reachable with the native server's own password, and returned a
+row count consistent with the native `firewall_dev`, not the Compose one). `docker compose
+config`/`ps` confirm the Compose file itself publishes `5432` correctly; the ambiguity is a
+host-level port collision between two independent PostgreSQL listeners, not a defect in
+`docker-compose.dev.yml`. The Compose Postgres container's own data was independently confirmed
+healthy and correct via `docker exec ... psql` directly inside the container (above). The native
+PostgreSQL processes were left running, not stopped, since they were not created by this issue's
+work and may still be needed for other local work.
+
+**Verification (lint/build/test):**
+
+```text
+npm run lint  → passed
+npm run build → passed
+npm test      → first run hit the same pre-existing Logger.test.ts cold-import flake documented
+  in §12/§15/§16 (2 failures this time, same class of issue); clean re-run: 178 passed, 17 skipped
+npm run test:db → 195 passed, 0 skipped (real PostgreSQL, via the local .env.test from the
+  previous diagnostic session)
+```
+
+No production Compose configuration was added (Issue #45), `.env.dev` was created locally for
+verification only and confirmed gitignored, not tracked. Course PDFs and `GAP_REPORT.md` were not
+touched.
