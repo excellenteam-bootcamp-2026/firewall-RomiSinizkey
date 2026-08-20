@@ -821,3 +821,99 @@ npm run test:db → 195 passed, 0 skipped (real PostgreSQL, via the local .env.t
 No production Compose configuration was added (Issue #45), `.env.dev` was created locally for
 verification only and confirmed gitignored, not tracked. Course PDFs and `GAP_REPORT.md` were not
 touched.
+
+## 18. Issue #45 — docker-compose.prod.yml (ChatGPT explanations, Claude implementation and verification)
+
+**Objective:** a production Compose file for the backend and PostgreSQL — no host DB port, no
+bind mounts, no hot reload, the existing non-root/migrate-then-server production flow, and
+reasonable restart policies — completing the design recorded in this report's §04/§13/§14/§16/§17.
+
+**AI collaboration on this issue:** ChatGPT was used first, in a concept-review role, before any
+file was written — explaining the difference between development and production Compose: both
+environments run the backend and PostgreSQL in Docker; development additionally supports source
+mounting, hot reload, and direct PostgreSQL access from DBeaver; production instead runs only the
+built application, excludes development tooling, blocks direct host access to PostgreSQL, runs as
+a non-root user, and uses separate persistent storage from development; and the intended service
+startup order — PostgreSQL healthcheck, then migrations, then backend startup. Claude then
+inspected the repository, implemented `docker-compose.prod.yml` against that design, and carried
+out the automated and manual verification — security and persistence checks included — recorded
+below, confirming each of ChatGPT's points independently rather than assuming them (see
+"Port-non-publication," "Non-root user," and "Volume independence" below).
+
+**Inspection before editing:** `Dockerfile`, `docker-compose.dev.yml`, `package.json`,
+`.env.prod.example`, and `README.md` were read first. Unlike Issue #44, no gap was found this
+time: the `production` Dockerfile stage's own `CMD` (`npm run start:container`) already runs the
+compiled migration runner before the server, and already switches to the non-root `app` user
+(Issue #42) — so `docker-compose.prod.yml` needed no `command:` override and no Dockerfile change.
+
+**Implementation** (`docker-compose.prod.yml`, new):
+
+- `postgres` service: `postgres:16`, credentials from `${POSTGRES_USER}`/`${POSTGRES_PASSWORD}`/
+  `${POSTGRES_DB}` (sourced from `.env.prod` via `--env-file`), a separate named volume
+  `postgres_data_prod:/var/lib/postgresql/data`, the same `$$`-escaped `pg_isready` healthcheck
+  pattern as `docker-compose.dev.yml`, and **no `ports:` block at all** — deliberately omitted
+  rather than merely unpublished, so PostgreSQL is reachable only from the `backend` container
+  over the Compose network, never from the host.
+- `backend` service: builds the `production` target, `env_file: .env.prod`, `ports: ["${PORT}:${PORT}"]`
+  (resolved from `.env.prod` rather than hardcoded, so a changed `PORT` stays consistent with what
+  the app actually binds), `depends_on: postgres: condition: service_healthy`, no `volumes:` (no
+  bind mount — the image runs exactly what was built into it), no `command:` override, and
+  `restart: unless-stopped` on both services.
+- `README.md` — new "Production Compose" subsection with the up/down commands and a dev-vs-prod
+  comparison table (Dockerfile target, source handling, migration mechanism, container user, host
+  DB port, volume name, restart policy).
+- `docker-compose.dev.yml` and `Dockerfile` were **not modified** — confirmed via `git diff --stat`
+  (no output) and by re-validating `docker compose --env-file .env.dev -f docker-compose.dev.yml
+  config --quiet`, which still passed cleanly.
+
+**Verification:**
+
+```text
+docker compose --env-file .env.prod -f docker-compose.prod.yml config → valid; confirmed no
+  `ports:` under postgres in the resolved output, and no credential value appeared in this
+  transcript (grepped out before display)
+docker compose --env-file .env.prod -f docker-compose.prod.yml up --build -d → both services
+  created; postgres reported Healthy before backend started
+```
+
+**Local `.env.prod` creation, without ever printing a credential:** copied from
+`.env.prod.example`, then a small Node script replaced every `CHANGE_ME_BEFORE_DEPLOY` placeholder
+with one randomly generated value (`crypto.randomBytes`, never logged) — confirmed programmatically
+afterward that `DB_PASSWORD` and `POSTGRES_PASSWORD` still matched each other post-replacement,
+without displaying either.
+
+**Migration-before-server, confirmed from the container's own log file** (production logs to
+`/app/logs/app.log`, not stdout — see Issue #42's §15): `"[migrate] running database
+migrations..."` → `"[migrate] migrations complete"` → PostgreSQL connection established →
+`"listening on port 3000"`, against the real `firewall_prod` database — before any HTTP request.
+
+**Functional smoke test:** `GET /health` → `200 {"status":"ok"}`. Inserted a domain rule through
+`POST /api/firewall/domains`; confirmed via `GET /api/firewall/rules` and, independently, with
+`docker exec ... psql` run directly inside the `postgres` container.
+
+**Port-non-publication, confirmed two ways:** `docker port firewall-romisinizkey-postgres-1`
+returned empty output (exit 0) — the definitive check, since a stray host-side TCP probe on 5432
+is confounded by the unrelated native PostgreSQL server already noted in §17; and the `docker
+compose ... ps` output itself showed `5432/tcp` with no host-side mapping, versus the backend's
+`0.0.0.0:3000->3000/tcp`.
+
+**Volume independence, confirmed by name, not just by restarting:** after `docker compose down`
+(no `-v`), `docker volume ls` showed all three named volumes from this repository's Docker work
+side by side — `postgres_data_dev`, `postgres_data_prod`, and `backend_node_modules` — proving the
+production database is not just persisted but is a genuinely separate volume from development's.
+Brought the stack back up and confirmed the same rule was still present via the API.
+
+**Non-root user, confirmed directly:** `docker exec firewall-romisinizkey-backend-1 whoami` → `app`.
+
+**Verification (lint/build/test):**
+
+```text
+npm run lint  → passed
+npm run build → passed
+npm test      → 178 passed, 17 skipped (clean run, no flake this time)
+```
+
+The environment was stopped cleanly afterward (`docker compose down`, no `-v`); `docker volume ls`
+confirmed `postgres_data_prod` (and the other two volumes) survived. `.env.prod` was created
+locally for verification only and confirmed gitignored, never tracked. Course PDFs and
+`GAP_REPORT.md` were not touched.
