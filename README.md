@@ -23,9 +23,11 @@ Hexagonal (Ports & Adapters) Architecture, and persists rules in PostgreSQL via 
 
 ## API endpoints
 
-All routes are mounted under `/api/firewall`. Request/response shapes below were verified
-directly against the controller (`src/adapters/inbound/http/controllers/firewallController.ts`)
-and the validators (`src/application/validation/ruleValidation.ts`).
+The firewall rule routes below are mounted under `/api/firewall`; a separate `GET /health`
+liveness route is mounted at the application root (see below). Request/response shapes were
+verified directly against the controller
+(`src/adapters/inbound/http/controllers/firewallController.ts`) and the validators
+(`src/application/validation/ruleValidation.ts`).
 
 ### `POST /api/firewall/ips`
 
@@ -126,6 +128,20 @@ Same atomic guarantee as `DELETE`: any missing ID → `404 RULE_NOT_FOUND`, noth
 | `INVALID_TYPE` | The `?type=` query value is not `ip`, `domain`, or `port`. |
 | `RULE_NOT_FOUND` (`404`) | One or more requested IDs don't exist. |
 | `INVALID_JSON` (`400`) | The request body isn't valid JSON. |
+
+### `GET /health`
+
+Mounted outside `/api/firewall`, at the application root. A pure liveness check: it does not
+query PostgreSQL, call any repository, or depend on database availability in any way — it
+responds `200` even if the database connection is down. Intended for container/orchestrator
+health checks (Docker `HEALTHCHECK`, Compose `service_healthy`), not for verifying database
+readiness.
+
+Success — `200`:
+
+```json
+{ "status": "ok" }
+```
 
 ## Architecture
 
