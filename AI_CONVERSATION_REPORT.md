@@ -917,3 +917,94 @@ The environment was stopped cleanly afterward (`docker compose down`, no `-v`); 
 confirmed `postgres_data_prod` (and the other two volumes) survived. `.env.prod` was created
 locally for verification only and confirmed gitignored, never tracked. Course PDFs and
 `GAP_REPORT.md` were not touched.
+
+## 19. Issue #46 — Docker Documentation and Smoke Test (ChatGPT + Claude, implemented and verified)
+
+**Objective:** complete the Docker documentation for the backend and PostgreSQL, and run a full,
+honest smoke test of both environments end-to-end — not just re-describing what Issues #42–#45
+already claimed, but actually re-verifying it.
+
+**AI collaboration on this issue:** consistent with this report's role split throughout (see
+"Purpose" at the top), ChatGPT supported the documentation side — reviewing what a reader would
+need to know to run either Compose environment cold (prerequisites, command sequence, what
+"healthy" actually depends on, what `down -v` does that plain `down` doesn't) and how to phrase
+troubleshooting entries so the *symptom* a user actually sees leads them to the right fix, matching
+this README's existing troubleshooting-table format rather than introducing a new one. Claude Code
+did the hands-on work: re-inspected the current `Dockerfile`, both Compose files, both env
+templates, `package.json`, `README.md`, and this report; wrote the documentation itself; and ran
+the full automated and manual verification below — including the one real defect it found, not
+assumed.
+
+**Inspection before editing:** confirmed nothing had drifted since Issues #42–#45 — `Dockerfile`,
+`docker-compose.dev.yml`, `docker-compose.prod.yml`, `.env.dev.example`/`.env.prod.example`, and
+`package.json` all matched what those issues' sections above already describe.
+
+**A real defect found by verification, not assumed — hot reload did not work over the Docker bind
+mount.** Editing a bind-mounted source file produced no restart at all, even after 30+ seconds.
+Root cause, confirmed by reading `ts-node-dev`'s own source: it watches files via `chokidar`, but
+only enables `usePolling` from an explicit `--poll` CLI flag — not automatically, and not via the
+usual `CHOKIDAR_USEPOLLING` environment variable — and native filesystem change events don't
+reliably cross a Docker Desktop bind mount. Fixed with the smallest change that fully scopes the
+behavior change to Docker: a new `dev:docker` script
+(`ts-node-dev --respawn --poll --transpile-only src/main/server.ts`), and
+`docker-compose.dev.yml`'s existing `command:` override updated to call it instead of plain
+`npm run dev`. The plain `dev` script — used by local, non-Docker development — was **not**
+changed. Verified with a real before/after: the identical source edit produced no log output at
+all before the fix, and after rebuilding with the fix, produced
+`"[INFO] ... Restarting: /app/src/main/server.ts has been modified"` within seconds, followed by a
+graceful `SIGTERM` shutdown and clean reconnect. The probe edit itself was reverted immediately
+after each test; `git diff --stat -- src/main/server.ts` confirmed the file ended byte-identical
+to its committed state.
+
+**Documentation added to `README.md`** (existing Docker section extended, not replaced): a new
+"Docker prerequisites" subsection (`docker version` must show both a Client *and* a Server
+section); an explicit "no frontend container" note in the Docker section's intro, since none
+exists in this repository; `restart`/additional `logs` commands added to both the development and
+production command blocks; a note that production logs to `/app/logs/app.log` inside the
+container, not stdout (unlike development), with the `docker exec ... cat` command to read it; a
+new "Startup order and migrations" subsection consolidating the healthcheck → migration →
+server-start sequence for both environments in one place; a new "Data persistence and volumes"
+subsection explaining the two named volumes and what does/doesn't survive `down`; a new "Docker
+cleanup" subsection with an explicit `down -v` warning (bold, callout-style) that it destroys that
+environment's database data with no confirmation prompt; and six new rows appended to the
+existing, already-established "Troubleshooting" table (not a separate table) — Docker Desktop not
+running, port 3000 in use, port 5432 in use, missing env files, PostgreSQL never reaching healthy,
+and migration failure.
+
+**Smoke test — development**, full cycle against real PostgreSQL: config validated; `up --build
+-d`; both services reached `healthy`, `postgres` before `backend`; `GET /health` → `200`; full
+CRUD (create/read/update/delete) exercised through the real API; migration order re-confirmed from
+container logs (migrate → complete → connect → listen); hot reload re-confirmed working after the
+fix above; `down` (no `-v`) → `up` again → the CRUD-created data was still present, proving the
+named volume, not the container, holds it.
+
+**Smoke test — production**, same rigor: config validated; both services `healthy`; `GET /health`
+→ `200`; full CRUD exercised; migration order confirmed from the container's own log file
+(`/app/logs/app.log`, since production doesn't log to stdout); non-root execution confirmed
+(`docker exec ... whoami` → `app`); PostgreSQL port isolation confirmed two independent ways —
+`docker port <postgres container>` returned nothing at all, and `docker compose ps` showed
+`5432/tcp` with no host-side mapping, versus the backend's `0.0.0.0:3000->3000/tcp`; `down` (no
+`-v`) → `up` again → the CRUD-created data was still present.
+
+**Ignore-rule re-verification:** `.env`, `.env.dev`, `.env.prod`, and `.env.test` all confirmed
+still ignored (`!!`) via `git status --ignored=matching` — no drift since Issues #43/#44's
+verification.
+
+**Verification (lint/build/test):**
+
+```text
+npm run lint    → passed
+npm run build   → passed
+npm test        → 178 passed, 17 skipped (clean run, no flake)
+npm run test:db → 195 passed, 0 skipped (real PostgreSQL, via the local .env.test)
+```
+
+**Cleanup:** both environments stopped with plain `down` (no `-v`) after verification; `docker ps
+-a` confirmed zero containers left running; `docker volume ls` confirmed all three named volumes
+(`postgres_data_dev`, `postgres_data_prod`, `backend_node_modules`) survived.
+
+`Project4-Dockerization-Plan.pdf` was updated separately (its HTML source was available) to record
+this issue's completion and the hot-reload fix, without touching any of the six actual course
+PDFs. Frontend Dockerization remains explicitly out of scope — undocumented as anything other than
+deferred, since no frontend exists in this repository. Course PDFs and `GAP_REPORT.md` were not
+touched. No credentials appear anywhere in this section.

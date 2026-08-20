@@ -5,6 +5,7 @@
   "main": "dist/main/server.js",
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only src/main/server.ts",
+    "dev:docker": "ts-node-dev --respawn --poll --transpile-only src/main/server.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/main/server.js",
     "lint": "tsc --noEmit",

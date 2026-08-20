@@ -474,7 +474,23 @@ npm run dev
 
 The backend has a multi-stage `Dockerfile` with three targets. No database credentials are
 baked into the image at any stage — they're supplied at container-start time via the env files
-below, and via Compose (development: this section; production: Issue #45).
+below, and via Compose (development: this section; production: Issue #45). **There is no frontend
+container** — no frontend exists in this repository yet, so it stays explicitly out of scope here;
+only the backend and PostgreSQL are Dockerized.
+
+### Docker prerequisites
+
+Docker Desktop (or a Docker Engine + Compose v2 install) must be **installed and running** —
+installed is not the same as running, and this is the single most common way the commands below
+fail. Verify both before doing anything else:
+
+```bash
+docker version         # must show both a Client AND a Server section
+docker compose version
+```
+
+If `docker version` only prints a `Client` section (no `Server`), Docker Desktop is installed but
+not started — start it and re-run the command before continuing.
 
 - **`development`** — full dependency tree, runs `npm run dev` (`ts-node-dev`, hot reload).
   Intended to run with the repository bind-mounted over `/app`.
@@ -531,9 +547,10 @@ migrations-before-server, a persistent database volume, and port 5432 published 
 ```bash
 cp .env.dev.example .env.dev   # first time only
 
-docker compose --env-file .env.dev -f docker-compose.dev.yml up --build -d
-docker compose --env-file .env.dev -f docker-compose.dev.yml logs -f backend
-docker compose --env-file .env.dev -f docker-compose.dev.yml down   # stops; keeps the DB volume
+docker compose --env-file .env.dev -f docker-compose.dev.yml up --build -d   # build + start
+docker compose --env-file .env.dev -f docker-compose.dev.yml logs -f backend # follow logs
+docker compose --env-file .env.dev -f docker-compose.dev.yml restart backend # restart one service
+docker compose --env-file .env.dev -f docker-compose.dev.yml down            # stop; keeps the DB volume
 ```
 
 `postgres` has a `pg_isready` healthcheck; `backend` waits for it via
@@ -543,15 +560,32 @@ over `/app` for hot reload, with a separate named volume shadowing just `/app/no
 host's `node_modules` never overwrites the image's own. On start, the backend container runs
 `npm run db:migrate:dev` (source-based, via `ts-node` — the `development` Dockerfile stage never
 runs `npm run build`, so the compiled `dist/main/migrate.js` used in production doesn't exist
-here) before handing off to `npm run dev`.
+here) before handing off to hot reload.
+
+Hot reload uses `npm run dev:docker`, **not** plain `npm run dev`, inside this Compose file
+specifically: `ts-node-dev`'s file watcher (`chokidar`) only receives native filesystem change
+events by default, and those don't reliably cross a Docker Desktop bind mount — verified directly
+during Issue #46: an edit to a bind-mounted file never triggered a restart until `--poll` was
+added. `dev:docker` is `ts-node-dev --respawn --poll ...`, scoped to this Docker path only; plain
+`npm run dev` (outside Docker) is untouched and still uses native watching, no polling overhead.
 
 ### Production Compose
 
 ```bash
 cp .env.prod.example .env.prod   # first time only, then replace every placeholder with a real value
 
-docker compose --env-file .env.prod -f docker-compose.prod.yml up --build -d
-docker compose --env-file .env.prod -f docker-compose.prod.yml down   # stops; keeps the DB volume
+docker compose --env-file .env.prod -f docker-compose.prod.yml up --build -d   # build + start
+docker compose --env-file .env.prod -f docker-compose.prod.yml restart backend # restart one service
+docker compose --env-file .env.prod -f docker-compose.prod.yml down            # stop; keeps the DB volume
+```
+
+**Logs:** unlike development, the production backend logs to `/app/logs/app.log` *inside* the
+container, not to stdout (`Logger.ts`'s existing dev-vs-production behavior — see Issue #42) —
+so `docker compose ... logs backend` only shows the two `npm` startup lines, nothing from the
+running app. To read the real application log:
+
+```bash
+docker exec <backend-container-name> cat /app/logs/app.log
 ```
 
 Same healthcheck-gated startup as development, but everything else is deliberately different:
@@ -569,6 +603,49 @@ Same healthcheck-gated startup as development, but everything else is deliberate
 `.env.prod` is created locally the same way as `.env.dev` — copied from the committed
 `.env.prod.example` template and never committed itself. Confirm no real production credential is
 ever placed in a tracked file before deploying with it.
+
+### Startup order and migrations
+
+Both Compose files enforce the same sequence, verified end-to-end against a real database for
+each environment (Issues #44/#45/#46):
+
+1. The `postgres` container starts; its `pg_isready` healthcheck must pass before anything else
+   proceeds — `depends_on: condition: service_healthy` on the `backend` service blocks it from
+   even starting until this happens (plain `depends_on` would only wait for the postgres
+   *container* to start, not for PostgreSQL to actually accept connections).
+2. The `backend` container's entrypoint runs database migrations — `db:migrate:dev` (source, via
+   `ts-node`) in development, or the image's own default `CMD` (compiled `dist/main/migrate.js`)
+   in production. A failed migration exits non-zero and the container stops **before** the server
+   ever starts, in both environments.
+3. Only after migrations succeed does the server start, connect to PostgreSQL, and begin listening.
+
+### Data persistence and volumes
+
+PostgreSQL data lives in a named volume per environment — `postgres_data_dev` and
+`postgres_data_prod` — mounted at `/var/lib/postgresql/data`. These are two entirely separate
+volumes: a production-mode run can never see development data, or vice versa. A named volume
+survives `docker compose down`, container recreation, and image rebuilds; it is **not** deleted
+unless you explicitly ask for that (see "Cleanup" below). The backend's own `node_modules` also
+lives in a named volume in development (`backend_node_modules`), for the unrelated reason of
+keeping the host's `node_modules` from shadowing the image's under the source bind mount.
+
+### Docker cleanup
+
+```bash
+docker compose --env-file .env.dev  -f docker-compose.dev.yml  down   # safe: containers only
+docker compose --env-file .env.prod -f docker-compose.prod.yml down   # safe: containers only
+```
+
+> [!WARNING]
+> Adding `-v` to either command above (`down -v`) also **deletes the named volumes** — this
+> permanently destroys the PostgreSQL data for that environment, with no confirmation prompt. Only
+> do this deliberately (e.g. to start a fresh database), never as a routine shutdown step.
+
+To also remove the built images (rarely needed — `up --build` already rebuilds on the next run):
+
+```bash
+docker rmi firewall-romisinizkey-backend
+```
 
 ## Manual API testing
 
@@ -636,6 +713,12 @@ Invoke-RestMethod -Uri "http://localhost:3000/api/firewall/ips" -Method Post -Co
 | `npm run db:migrate` (or the app's own connection) fails with an SSL-related error (e.g. `the server does not support SSL connections` or the reverse, a certificate error) | **SSL mismatch** between the client and server — most local PostgreSQL installs don't have SSL enabled, but a client may still expect it | This repo already sets `ssl: false` in `drizzle.config.ts` for migrations; the app's own connection (`pg.Pool` in `connection.ts`) also doesn't request SSL. If you're pointing at a remote/cloud database that *requires* SSL, that's a configuration difference from this project's default local setup, not a bug in the app. |
 | Running `psql` directly gives `fe_sendauth: no password supplied` | `psql` prompts for a password interactively; it wasn't provided | Either let `psql` prompt you and type it in, pass `-W`, or set the `PGPASSWORD` environment variable for that one command (avoid putting it in shell history or scripts). |
 | `npm test` shows `17 skipped` and no PostgreSQL integration tests actually ran | **Expected when `TEST_DB_*` isn't configured** — `tests/integration/db/` skips itself by design so `npm test` stays offline-safe by default (see "Environment variables" and "Testing and verification") | To actually run them locally: create `firewall_test` (see "PostgreSQL and Drizzle setup"), set `TEST_DB_*` in your shell or `.env`, and re-run `npm test`. In CI this is already handled — `.github/workflows/ci.yml` provisions an ephemeral PostgreSQL service with these variables pre-set. |
+| Any `docker`/`docker compose` command fails immediately, e.g. `error during connect ... the system cannot find the file specified`, or hangs | **Docker Desktop is installed but not running** — installed is not the same as running | Start Docker Desktop; confirm with `docker version` that it prints both a `Client` and a `Server` section before retrying. |
+| `docker compose ... up` fails with `port is already allocated` / `bind: address already in use` for **port 3000** | Another process (often a leftover `npm run dev`, or a previous container that wasn't fully stopped) is already bound to 3000 | Stop the other process, or change `PORT` in `.env.dev`/`.env.prod` and re-run `up --build`. |
+| `docker compose -f docker-compose.dev.yml ... up` fails the same way for **port 5432**, or a host tool connects but gets the wrong data/wrong password | Something else already owns host port 5432 — commonly a native (non-Docker) PostgreSQL install running locally, which will silently answer instead of the Compose container | Stop the other PostgreSQL service before using the dev Compose stack, or connect DBeaver to a different local port by changing the dev file's `5432:5432` mapping (e.g. `55432:5432`) — the production file never publishes this port at all, so it can't happen there. |
+| `docker compose ... up` fails fast with something like `env file .env.dev not found` | **`.env.dev`/`.env.prod` don't exist yet** — they're gitignored and created locally per clone, not committed | `cp .env.dev.example .env.dev` (or the `.prod` equivalent), then re-run `up --build`. |
+| `docker compose ps` shows `postgres` stuck as `starting` (never `healthy`), and `backend` never starts at all | **PostgreSQL isn't actually coming up healthy** — often wrong/mismatched `POSTGRES_*` values, or a corrupted volume from a previous crash | `docker compose logs postgres` to see the real Postgres startup error; if the data volume itself is suspect, `down -v` **destroys that environment's data** (see "Cleanup") and lets Postgres re-initialize from scratch. |
+| The `backend` container exits shortly after starting, before ever reaching `"listening on port ..."` | **Migration failure** — the entrypoint's `&&`/`command:` chain stops the container before the server starts on purpose, per "Startup order and migrations" above | `docker compose logs backend` (development) or `docker exec <container> cat /app/logs/app.log` (production, see "Production Compose" — production logs to a file, not stdout) for the actual Drizzle/Postgres error; fix the underlying cause (e.g. a bad migration, unreachable database), then `up --build` again. |
 
 ## Testing and verification
 

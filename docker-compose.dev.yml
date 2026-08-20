@@ -47,8 +47,15 @@ services:
     # does not run migrations. This override runs the source-based migration
     # runner first (db:migrate:dev, via ts-node — the compiled dist/main/migrate.js
     # doesn't exist in this stage, since "development" never runs `npm run build`),
-    # then hands off to the normal hot-reload dev server.
-    command: sh -c "npm run db:migrate:dev && npm run dev"
+    # then hands off to the hot-reload dev server — via `dev:docker`, not plain
+    # `dev`: ts-node-dev's file watcher (chokidar) only receives native filesystem
+    # change events with its default settings, and those don't reliably cross a
+    # Docker Desktop bind mount (confirmed by verification: edits to a bind-mounted
+    # file never triggered a respawn). `dev:docker` adds chokidar's `--poll` mode,
+    # which works over a bind mount at the cost of some extra CPU from periodic
+    # polling — scoped to this Docker path only; plain `npm run dev` (outside
+    # Docker, native filesystem) is untouched and still uses native watching.
+    command: sh -c "npm run db:migrate:dev && npm run dev:docker"
 
 volumes:
   postgres_data_dev:
