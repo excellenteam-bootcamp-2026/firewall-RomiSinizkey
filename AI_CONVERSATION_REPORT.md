@@ -1085,3 +1085,146 @@ No file under `src/`, `tests/`, `dist/`, or any Node/Docker config was modified.
 `GAP_REPORT.md` were not touched. Nothing was staged, committed, pushed, or changed on GitHub — all
 work is local, uncommitted changes on `feature/55-python-service-structure`. No credentials appear
 anywhere in this section.
+
+## 21. Issue #56 — Validated Configuration with Pydantic (ChatGPT explanations, Claude implementation and verification)
+
+**Objective:** one validated, immutable Python settings object (`ENV`, `DATABASE_URI`, `LOG_LEVEL`),
+loaded once at startup via Pydantic / pydantic-settings, mirroring `env.ts`'s fail-fast pattern —
+so nothing else in the service reads `os.environ` directly. No structlog, `ApplicationError`,
+domain logic, or SQLAlchemy was added — those are Issues #57–#59.
+
+**AI collaboration on this issue:** consistent with this report's established role split (see
+"Purpose" at the top), Claude Code did the hands-on work — writing `config.py`, the 13-case pytest
+suite, and running every verification below. ChatGPT reviewed the finished implementation afterward
+and explained it in plain terms, summarized here:
+
+- **`Settings`** is the one class that owns every environment variable this service needs. It
+  subclasses **`BaseSettings`** (from `pydantic-settings`), which is Pydantic's variant of a regular
+  model built specifically to read its field values from environment variables and an optional
+  `.env` file, instead of from a plain dict passed in by hand.
+- **`field_validator`** attaches custom validation to one specific field (`DATABASE_URI` must not be
+  blank; `LOG_LEVEL` must be a real logging level) and is declared as a **`classmethod`** because
+  Pydantic calls it against the class itself during validation, before a real instance exists to
+  call it on.
+- **`model_validator(mode="after")`** runs once the whole object has already been built from its
+  individual fields, which is why it's the one used for the dev/production safety guard — that
+  check needs to see `ENV` and `DATABASE_URI` together, not one field in isolation.
+- The exported **`settings`** singleton is a single, frozen (immutable) instance — built once, the
+  moment the module is first imported, and never rebuilt or mutated afterward. Every other part of
+  the service is meant to import this one object rather than read `os.environ` itself.
+- **Sanitized validation errors:** left alone, Pydantic's own error object would include the raw
+  value of every *other* field supplied alongside a bad one — which could include a real
+  `DATABASE_URI` and its password. `config.py` catches that error and rebuilds a clean message from
+  only the field name and the reason it failed, never the value, before it can be printed or logged
+  anywhere.
+- **Fail-fast startup:** all of this validation happens the instant the configuration module is
+  imported, not later when some field happens to be used — so a broken configuration stops the
+  service immediately, before any other startup work runs.
+
+**How `python -m src.main` behaves:** running it imports `settings` from `config.py`; that import is
+what triggers pydantic-settings to load `.env` (if present) and the process environment, and
+validate `ENV`, `DATABASE_URI`, and `LOG_LEVEL` against the rules above. If everything is valid, the
+entry point prints `ENV` and `LOG_LEVEL` (never `DATABASE_URI`) and continues safely; if anything is
+missing or invalid, the import itself raises, the process stops with a non-zero exit status, and
+nothing past that point ever runs.
+
+**Scope reminder:** Issue #56 validates configuration shape only. `DATABASE_URI` is checked for
+presence and non-blankness (and, for `ENV=dev`, that its database name doesn't look like a
+production one) — this issue never opens a PostgreSQL connection or imports SQLAlchemy/psycopg;
+actually connecting with `DATABASE_URI` is Issue #59's job.
+
+**Before editing:** confirmed the branch (`feature/56-python-config-pydantic`); found Issue #55 had
+already been merged into `main` via PR #62 between sessions, so this branch started from a clean,
+up-to-date `main` with `python-rule-service/` already present. Read Issue #56's full body from
+GitHub and compared it against `Project6-Dockerization-Plan.pdf` §06 "6.2" — no conflict, since the
+issue body was authored directly from that PDF section during Project 6 board setup. Inspected the
+existing `python-rule-service/` tree, `.gitignore`, `README.md`, `requirements.txt`, Node's
+`src/main/env.ts` (the fail-fast/`formatIssues` model to mirror) and `.env.example`, and the
+existing Vitest env-config test conventions (`tests/unit/main/env.test.ts`) before writing anything.
+
+**Files changed:**
+- `python-rule-service/requirements.txt` — added `pydantic`, `pydantic-settings`, `pytest`.
+- `python-rule-service/src/main/config.py` (new) — the `Settings` model and exported `settings`
+  singleton.
+- `python-rule-service/tests/unit/main/test_config.py` (new) — 13 pytest cases.
+- `python-rule-service/.env.example` (new) — safe placeholder template.
+- `python-rule-service/.gitignore` — added `.env` / `!.env.example`, mirroring the root repo's
+  pattern (not present before this issue, since #55 never had real config to protect).
+- `python-rule-service/src/main/__main__.py` — updated from #55's plain venv smoke-test print to
+  load `settings` and print `ENV`/`LOG_LEVEL` only, proving config wiring instead.
+- `python-rule-service/README.md` — added Configuration/Run/Tests sections.
+
+**Design decision — a real secret-leakage risk found and closed before any test was written:**
+empirically probed Pydantic's own `ValidationError` (not assumed) with a throwaway script: when one
+field is missing, `errors()[i]['input']` contains the **full raw values of every other field
+supplied** — including a `DATABASE_URI` with a real-looking password, confirmed to appear verbatim
+in both `errors()` and even the truncated `str(exc)` output. Since the issue explicitly requires
+never printing or logging `DATABASE_URI`/credentials, `config.py` catches `ValidationError` in
+`load_settings()` and re-raises a `RuntimeError` built only from each error's `loc` (field path) and
+`msg` — never `input` — with `from None` to suppress exception chaining (which would otherwise let
+Python's own traceback printer surface the original `ValidationError`'s leaky `str()` anyway). This
+directly mirrors `env.ts`'s `formatIssues`, which has the same never-echo-the-value property. A
+dedicated test (`TestNoSecretLeakage`) asserts a password planted in `DATABASE_URI` never appears in
+the resulting error string.
+
+**Design decision — the development-to-production safety guard:** implemented as a
+`model_validator(mode="after")` that parses `DATABASE_URI`'s path component and refuses to start
+when `ENV=dev` and the database name contains `"prod"` (matching this repo's own
+`firewall_dev`/`firewall_prod`/`firewall_test` naming convention, confirmed by reading the root
+`.env.dev`/`.env.prod`). Directional only (dev → not-prod), matching the literal requirement; the
+broader `_test`-suffix database guard for integration tests is explicitly Issue #59/#60's job per
+the plan PDF, not duplicated here.
+
+**Design decision — how tests avoid the import-time fail-fast trap:** `config.py` validates and
+constructs its `settings` singleton at module import time (the real fail-fast behavior being
+tested), which means merely importing the module during pytest collection - before any
+`monkeypatch` fixture can run - would fail on a real machine's ambient environment. Fixed by setting
+a safe, non-secret baseline (`ENV=dev`, a placeholder `DATABASE_URI` targeting `firewall_dev`,
+`LOG_LEVEL=INFO`) via plain `os.environ` assignment at the very top of `test_config.py`, before the
+`from src.main.config import ...` line - the same "set env, then import" ordering
+`tests/unit/main/env.test.ts` achieves via `vi.resetModules()` + dynamic `import()`, translated to
+Python's simpler single-pass module execution model. Individual test scenarios then construct fresh
+`Settings(_env_file=None)` instances directly (bypassing the cached singleton and disabling `.env`
+file loading), verified empirically first via a throwaway script to confirm `_env_file` is the
+correct pydantic-settings 2.15 override kwarg - keeping every scenario fully isolated from both the
+real environment and any local `.env` file, with no real PostgreSQL connection anywhere in the
+suite.
+
+**Pytest suite (13 tests, `tests/unit/main/test_config.py`):** valid configuration (all three
+fields, `LOG_LEVEL` case-insensitivity/normalization, the module-level `settings` singleton itself);
+each of the three required variables missing (parametrized); invalid `ENV`; invalid `LOG_LEVEL`;
+immutability (mutating a constructed instance raises `pydantic.ValidationError` with
+`type=frozen_instance`, confirmed empirically rather than assumed to be `TypeError`); the dev/prod
+safety guard in both directions (dev+prod-looking database rejected, dev+dev-looking database
+accepted, production+prod-looking database accepted); and the no-secret-leakage test above.
+
+**Manual startup verification**, run via `python -m src.main` with env vars passed inline on the
+command line only (no `.env` file was created or committed):
+- Valid `ENV=dev` + placeholder `DATABASE_URI` + `LOG_LEVEL=info` → exit 0,
+  `python-rule-service config OK - ENV=dev LOG_LEVEL=INFO`.
+- Missing `DATABASE_URI` → exit 1, `RuntimeError: ... DATABASE_URI: Field required`.
+- Invalid `ENV=staging` → exit 1, `RuntimeError: ... ENV: Input should be 'dev' or 'production'`.
+- Invalid `LOG_LEVEL=VERBOSE` → exit 1, `RuntimeError: ... LOG_LEVEL: ... must be one of [...]`.
+- `ENV=dev` + a `firewall_prod`-named `DATABASE_URI` → exit 1, the dev/prod safety-guard message,
+  with the database name only (never the full URI) in the text.
+
+**Verification (Python):**
+
+```text
+python -m pytest    → 13 passed in 0.24s (run from python-rule-service/, no path argument needed)
+```
+
+**Verification (Node, unchanged toolchain, confirming the existing backend still works):**
+
+```text
+npm run lint   → passed (tsc --noEmit)
+npm run build  → passed (tsc -p tsconfig.json)
+npm test       → 178 passed, 17 skipped, 0 failed (clean run, no flake this time)
+```
+
+`git status --short` on `src/`, `tests/`, `package.json`, `vitest.config.mts`, `tsconfig.json`,
+`.github/`, `Dockerfile`, and both Compose files showed zero changes throughout. Course PDFs and
+`GAP_REPORT.md` were not touched. No real `.env` file was created inside `python-rule-service/` at
+any point - `python-rule-service/.gitignore` now excludes it (`!.env.example` kept trackable).
+Nothing was staged, committed, pushed, or changed on GitHub - all work is local, uncommitted changes
+on `feature/56-python-config-pydantic`. No credentials appear anywhere in this section.

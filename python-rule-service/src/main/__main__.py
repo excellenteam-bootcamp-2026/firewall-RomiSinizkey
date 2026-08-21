@@ -1,8 +1,8 @@
-import sys
+from src.main.config import settings
 
 
 def main() -> None:
-    print("python-rule-service skeleton OK - Python", sys.version.split()[0])
+    print(f"python-rule-service config OK - ENV={settings.ENV} LOG_LEVEL={settings.LOG_LEVEL}")
 
 
 if __name__ == "__main__":

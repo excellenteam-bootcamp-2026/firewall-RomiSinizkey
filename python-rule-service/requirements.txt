@@ -1,2 +1,5 @@
-# Empty by design (Issue #55). Dependencies are added incrementally:
-# pydantic, pydantic-settings, pytest (#56); structlog (#57); sqlalchemy, psycopg[binary] (#59).
+# Dependencies added incrementally, one issue at a time:
+# structlog (#57); sqlalchemy, psycopg[binary] (#59).
+pydantic
+pydantic-settings
+pytest
