@@ -1,8 +1,9 @@
 from src.main.config import settings
+from src.main.logger import logger
 
 
 def main() -> None:
-    print(f"python-rule-service config OK - ENV={settings.ENV} LOG_LEVEL={settings.LOG_LEVEL}")
+    logger.info("service_startup", env=settings.ENV, configured_log_level=settings.LOG_LEVEL)
 
 
 if __name__ == "__main__":
