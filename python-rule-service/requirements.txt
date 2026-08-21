@@ -1,5 +1,6 @@
 # Dependencies added incrementally, one issue at a time:
-# structlog (#57); sqlalchemy, psycopg[binary] (#59).
+# sqlalchemy, psycopg[binary] (#59).
 pydantic
 pydantic-settings
 pytest
+structlog
