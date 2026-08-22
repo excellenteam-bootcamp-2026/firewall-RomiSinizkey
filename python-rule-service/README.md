@@ -3,28 +3,36 @@
 Independent Python service that will eventually become the sole writer of firewall
 configuration changes (Epic #54, `Project6-Dockerization-Plan.pdf`). Issue #55 stood
 up the environment and the hexagonal folder skeleton; Issue #56 added validated
-startup configuration; Issue #57 adds structured logging and a reusable application
-error type. Domain logic and database code are still to come (#58-#61). The existing
-Node.js API is unchanged and keeps serving all traffic.
+startup configuration; Issue #57 added structured logging and a reusable application
+error type; Issue #58 adds the first business operation - Add IP - as a domain
+model, an application use case, and a repository port. Database code is still to
+come (#59-#61). The existing Node.js API is unchanged and keeps serving all traffic.
 
 ## Structure
 
 ```
 src/
-  domain/                          business rules (arrives in #58)
+  domain/
+    entities/firewall_rule.py      RuleMode, NewFirewallRule (self-validating), FirewallRule (this issue, #58)
+    errors.py                      InvalidIpError (this issue, #58)
   application/
-    errors.py                      ApplicationError(code, message) (this issue, #57)
-    use-cases/, ports/              arrives in #58
+    errors.py                      ApplicationError(code, message) (#57)
+    ports/rule_repository.py       RuleRepository (abstract, add() only) (this issue, #58)
+    use_cases/add_ip_use_case.py   AddIpUseCase (this issue, #58)
   adapters/outbound/persistence/   SQLAlchemy repository (arrives in #59)
   main/
     config.py                      validated Pydantic settings (#56)
-    logger.py                      configured structlog logger (this issue, #57)
+    logger.py                      configured structlog logger (#57)
     __main__.py                    entry point - loads settings, logs a startup event
 tests/
-  unit/main/test_config.py         config validation tests (#56)
-  unit/main/test_logger.py         structured output + level filtering (this issue, #57)
-  unit/main/test_main.py           entry-point startup event tests (this issue, #57)
-  unit/application/test_errors.py  ApplicationError tests (this issue, #57)
+  unit/main/test_config.py                     config validation tests (#56)
+  unit/main/test_logger.py                     structured output + level filtering (#57)
+  unit/main/test_main.py                       entry-point startup event tests (#57)
+  unit/application/test_errors.py              ApplicationError tests (#57)
+  unit/domain/entities/test_firewall_rule.py   IPv4 validation + domain purity (this issue, #58)
+  unit/domain/test_errors.py                   InvalidIpError tests (this issue, #58)
+  unit/application/ports/test_rule_repository.py    port contract tests (this issue, #58)
+  unit/application/use_cases/test_add_ip_use_case.py  AddIpUseCase tests (this issue, #58)
   conftest.py                      safe baseline env, so config-dependent test
                                     modules collect regardless of run order
   integration/
@@ -101,8 +109,37 @@ machine-checkable `code` (e.g. `"INVALID_IP"`) and a human-readable `message`.
 It carries nothing else - no internal details, no credentials - so its `str()`,
 `repr()`, and `to_dict()` are all safe to log or serialize as-is. This mirrors
 Node's `AppError`/`ValidationError` precedent, minus the HTTP-specific
-`statusCode`, since this service has no inbound HTTP adapter yet. IP-specific
-errors (e.g. `InvalidIpError`) arrive in Issue #58.
+`statusCode`, since this service has no inbound HTTP adapter yet.
+
+## Add IP (domain, use case, repository port)
+
+The first ported business operation, mirroring Node's `FirewallRule.ts` /
+`AddRulesUseCase.ts` / `RuleRepository.ts` slice - adapted idiomatically for
+Python rather than translated line-by-line.
+
+- **Domain** (`src/domain/entities/firewall_rule.py`): `NewFirewallRule(mode, value)`
+  validates `value` on construction using Python's standard `ipaddress` module
+  (`IPv4Address`, IPv4 only - matching Node's current IPv4-only regex; IPv6 is
+  explicitly out of scope for this issue and is rejected) and raises the
+  domain-owned `InvalidIpError` (`src/domain/errors.py`) if it isn't a valid,
+  plain dotted-decimal string. `FirewallRule` additionally carries `id` and
+  `active`, returned after a successful save. The domain has zero imports from
+  `application/`, `adapters/`, Pydantic, SQLAlchemy, or `structlog` - enforced by
+  a source-scanning test, not just by convention.
+- **Repository port** (`src/application/ports/rule_repository.py`): an abstract
+  `RuleRepository` with exactly one method, `add(rule) -> FirewallRule`.
+  Deliberately minimal - just what `AddIpUseCase` needs - not a port of Node's
+  full four-method interface. No concrete (e.g. SQLAlchemy) implementation exists
+  yet; that's Issue #59.
+- **Use case** (`src/application/use_cases/add_ip_use_case.py`): `AddIpUseCase`
+  constructs a `NewFirewallRule` (which validates itself); if that raises
+  `InvalidIpError`, the use case - not the domain - catches it and raises
+  `ApplicationError(code="INVALID_IP", message=...)` instead, then returns
+  without ever calling the repository. On success, it calls
+  `repository.add(...)` once and returns exactly what the repository returns.
+  Logs one structured event either way (`add_ip_rejected` or
+  `add_ip_succeeded`) via the Issue #57 logger - `mode` and the rule's `id`/IP
+  value only, never a secret.
 
 ## Run
 
