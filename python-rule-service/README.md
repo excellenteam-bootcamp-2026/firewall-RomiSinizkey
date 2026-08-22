@@ -5,10 +5,13 @@ configuration changes (Epic #54, `Project6-Dockerization-Plan.pdf`). Issue #55 s
 up the environment and the hexagonal folder skeleton; Issue #56 added validated
 startup configuration; Issue #57 added structured logging and a reusable application
 error type; Issue #58 added the first business operation - Add IP - as a domain
-model, an application use case, and a repository port; Issue #59 adds the concrete
+model, an application use case, and a repository port; Issue #59 added the concrete
 SQLAlchemy/PostgreSQL implementation of that port, reusing the existing
-`firewall_rules` table. The existing Node.js API is unchanged and keeps serving all
-traffic; no schema, migration, HTTP, or Docker changes were made.
+`firewall_rules` table; Issue #60 consolidates the pytest suite, adds an
+end-to-end integration test through the real database, and fixes a
+`pythonpath`/collection gap and a local-`.env` test-isolation bug. The existing
+Node.js API is unchanged and keeps serving all traffic; no schema, migration,
+HTTP, or Docker changes were made.
 
 ## Structure
 
@@ -33,20 +36,25 @@ tests/
   unit/main/test_config.py                     config validation tests (#56)
   unit/main/test_logger.py                     structured output + level filtering (#57)
   unit/main/test_main.py                       entry-point startup event tests (#57)
-  unit/main/test_db.py                         engine construction + no-secret-leak (this issue, #59)
+  unit/main/test_db.py                         engine construction + no-secret-leak (#59)
   unit/application/test_errors.py              ApplicationError tests (#57)
   unit/domain/entities/test_firewall_rule.py   IPv4 validation + domain purity (#58)
   unit/domain/test_errors.py                   InvalidIpError tests (#58)
   unit/application/ports/test_rule_repository.py    port contract tests (#58)
   unit/application/use_cases/test_add_ip_use_case.py  AddIpUseCase tests (#58)
+  unit/conftest.py                shared FakeRuleRepository fixture (this issue, #60)
   integration/
-    db_test_helpers.py             TEST_DATABASE_URI + the "_test"-suffix safety guard (this issue, #59)
-    test_db_test_helpers.py        pure guard-logic tests, no real database (this issue, #59)
+    db_test_helpers.py             TEST_DATABASE_URI + the "_test"-suffix safety guard (#59)
+    test_db_test_helpers.py        pure guard-logic tests, no real database (#59)
+    conftest.py                    shared engine + table-cleanup fixtures (this issue, #60)
     adapters/outbound/persistence/postgres/test_sqlalchemy_rule_repository.py
-                                    real PostgreSQL tests against firewall_test (this issue, #59)
+                                    real PostgreSQL tests against firewall_test (#59)
+    test_add_ip_end_to_end.py      AddIpUseCase -> repository -> PostgreSQL (this issue, #60)
   conftest.py                      safe baseline env, so config-dependent test
                                     modules collect regardless of run order
   fixtures/
+pytest.ini                          pythonpath = . - makes plain `pytest` work,
+                                     not just `python -m pytest` (this issue, #60)
 ```
 
 ## Setup
@@ -185,15 +193,31 @@ Node's `TEST_DB_*` / `DB_*` separation, so there is no code path by which
 these tests could reach a non-test database through the application's config.
 
 ```
-TEST_DATABASE_URI=postgresql+psycopg://user:pass@localhost:5432/firewall_test python -m pytest
+TEST_DATABASE_URI=postgresql+psycopg://user:pass@localhost:5432/firewall_test pytest
 ```
 
+Covers the repository directly (`test_sqlalchemy_rule_repository.py`) and the
+complete path wired together
+(`test_add_ip_end_to_end.py`: `AddIpUseCase` -> `SqlAlchemyRuleRepository` ->
+PostgreSQL), verifying both the returned `FirewallRule` and the row actually
+stored. `tests/integration/conftest.py` shares the `engine` and table-cleanup
+fixtures between both files - opt-in per module via
+`pytest.mark.usefixtures(...)`, never `autouse`, so
+`test_db_test_helpers.py`'s pure guard-logic tests keep working with no
+`TEST_DATABASE_URI` at all.
+
 **Safety guard:** if `TEST_DATABASE_URI` is set but its database name doesn't
-end with `_test`, the guard module raises immediately at import/collection
-time - before any query runs - refusing to run against `firewall_dev`,
-`firewall_prod`, or anything else not obviously disposable. Left unset, the
-integration tests are skipped and the rest of the suite stays fully offline.
-Each test cleans up every row it inserts.
+end with `_test`, the guard module raises immediately - before any test in
+`tests/integration/` is even collected, since every module there now shares
+one conftest.py that imports the guard - refusing to run against
+`firewall_dev`, `firewall_prod`, or anything else not obviously disposable.
+Left unset, the integration tests are skipped and the rest of the suite stays
+fully offline. Each test cleans up every row it creates, before and after -
+via a fixture, so cleanup still runs even if the test itself fails.
+
+No local `.env.test` file is required or read for any of this - the real
+credentials, if any, live only in the `TEST_DATABASE_URI` value you pass on
+the command line.
 
 ## Run
 
@@ -208,13 +232,37 @@ with `env` and `configured_log_level` (never `DATABASE_URI`), then exits 0.
 
 ## Tests
 
+Default - offline, no database required (matches Node's `npm test`):
+
 ```
-python -m pytest
+pytest
+```
+
+`pytest.ini` sets `pythonpath = .`, so plain `pytest` and `python -m pytest`
+behave identically; both are safe to use.
+
+Full suite against a real test database (matches Node's `npm run test:db`):
+
+```
+TEST_DATABASE_URI=postgresql+psycopg://user:pass@localhost:5432/firewall_test pytest
 ```
 
 Unit tests run entirely offline against monkeypatched environment variables -
 no real PostgreSQL connection is made or required. PostgreSQL integration
 tests additionally run when `TEST_DATABASE_URI` is set (see above); otherwise
-they're skipped and the rest of the suite is unaffected.
+they're skipped and the rest of the suite is unaffected. No committed
+credential file is needed for either command, and neither reads the Node
+service's `.env`/`.env.test`.
+
+**A local `.env` does not affect unit tests.** `src/main/config.py` reads
+`python-rule-service/.env` by default (so `python -m src.main` works without
+manually exporting variables), and most config tests already build `Settings`
+directly with `_env_file=None`, bypassing it entirely. One test
+(`TestNoSecretLeakage`) instead calls the real `load_settings()` to verify its
+error formatting, deleting `ENV` from the environment first - which meant a
+real local `.env` with `ENV=dev` could silently refill that gap and defeat the
+test. Fixed with `monkeypatch.setitem(Settings.model_config, "env_file",
+None)`, scoped to that one test only (auto-reverted by pytest afterward) -
+verified with a real `.env` present and absent, both ways passing.
 
 Full architecture documentation lands in Issue #61.

@@ -1,35 +1,20 @@
-from collections.abc import Iterator
-
 import pytest
-from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 
 from src.adapters.outbound.persistence.postgres.schema import firewall_rules
 from src.adapters.outbound.persistence.postgres.sqlalchemy_rule_repository import SqlAlchemyRuleRepository
 from src.domain.entities.firewall_rule import FirewallRule, NewFirewallRule
-from tests.integration.db_test_helpers import TEST_DATABASE_URI, has_test_database_config
+from tests.integration.db_test_helpers import has_test_database_config
 
 # Runs against a real, isolated PostgreSQL database (TEST_DATABASE_URI, guarded
 # in db_test_helpers.py to end with "_test"). Skips entirely when no test
-# database is configured, so `python -m pytest` stays DB-free by default.
-pytestmark = pytest.mark.skipif(not has_test_database_config, reason="TEST_DATABASE_URI is not configured")
-
-
-@pytest.fixture()
-def engine() -> Iterator[Engine]:
-    assert TEST_DATABASE_URI is not None  # guaranteed by pytestmark's skipif above
-    test_engine = create_engine(TEST_DATABASE_URI)
-    yield test_engine
-    test_engine.dispose()
-
-
-@pytest.fixture(autouse=True)
-def _clean_firewall_rules_table(engine: Engine) -> Iterator[None]:
-    with engine.begin() as connection:
-        connection.execute(firewall_rules.delete())
-    yield
-    with engine.begin() as connection:
-        connection.execute(firewall_rules.delete())
+# database is configured, so `pytest` stays DB-free by default. `engine` and
+# the cleanup fixture come from tests/integration/conftest.py, shared with
+# test_add_ip_end_to_end.py.
+pytestmark = [
+    pytest.mark.skipif(not has_test_database_config, reason="TEST_DATABASE_URI is not configured"),
+    pytest.mark.usefixtures("_clean_firewall_rules_table"),
+]
 
 
 class TestSqlAlchemyRuleRepositoryAdd:
