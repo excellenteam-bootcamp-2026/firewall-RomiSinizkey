@@ -7,5 +7,5 @@ import os
 # to be in place. setdefault() only fills in what's missing, so a real value set
 # elsewhere is never overridden.
 os.environ.setdefault("ENV", "dev")
-os.environ.setdefault("DATABASE_URI", "postgresql://test_user:test_pass@localhost:5432/firewall_dev")
+os.environ.setdefault("DATABASE_URI", "postgresql+psycopg://test_user:test_pass@localhost:5432/firewall_dev")
 os.environ.setdefault("LOG_LEVEL", "INFO")

@@ -4,38 +4,48 @@ Independent Python service that will eventually become the sole writer of firewa
 configuration changes (Epic #54, `Project6-Dockerization-Plan.pdf`). Issue #55 stood
 up the environment and the hexagonal folder skeleton; Issue #56 added validated
 startup configuration; Issue #57 added structured logging and a reusable application
-error type; Issue #58 adds the first business operation - Add IP - as a domain
-model, an application use case, and a repository port. Database code is still to
-come (#59-#61). The existing Node.js API is unchanged and keeps serving all traffic.
+error type; Issue #58 added the first business operation - Add IP - as a domain
+model, an application use case, and a repository port; Issue #59 adds the concrete
+SQLAlchemy/PostgreSQL implementation of that port, reusing the existing
+`firewall_rules` table. The existing Node.js API is unchanged and keeps serving all
+traffic; no schema, migration, HTTP, or Docker changes were made.
 
 ## Structure
 
 ```
 src/
   domain/
-    entities/firewall_rule.py      RuleMode, NewFirewallRule (self-validating), FirewallRule (this issue, #58)
-    errors.py                      InvalidIpError (this issue, #58)
+    entities/firewall_rule.py      RuleMode, NewFirewallRule (self-validating), FirewallRule (#58)
+    errors.py                      InvalidIpError (#58)
   application/
     errors.py                      ApplicationError(code, message) (#57)
-    ports/rule_repository.py       RuleRepository (abstract, add() only) (this issue, #58)
-    use_cases/add_ip_use_case.py   AddIpUseCase (this issue, #58)
-  adapters/outbound/persistence/   SQLAlchemy repository (arrives in #59)
+    ports/rule_repository.py       RuleRepository (abstract, add() only) (#58)
+    use_cases/add_ip_use_case.py   AddIpUseCase (#58)
+  adapters/outbound/persistence/postgres/
+    schema.py                      firewall_rules Table mapping (this issue, #59)
+    sqlalchemy_rule_repository.py  SqlAlchemyRuleRepository (this issue, #59)
   main/
     config.py                      validated Pydantic settings (#56)
     logger.py                      configured structlog logger (#57)
+    db.py                          SQLAlchemy Engine built from DATABASE_URI (this issue, #59)
     __main__.py                    entry point - loads settings, logs a startup event
 tests/
   unit/main/test_config.py                     config validation tests (#56)
   unit/main/test_logger.py                     structured output + level filtering (#57)
   unit/main/test_main.py                       entry-point startup event tests (#57)
+  unit/main/test_db.py                         engine construction + no-secret-leak (this issue, #59)
   unit/application/test_errors.py              ApplicationError tests (#57)
-  unit/domain/entities/test_firewall_rule.py   IPv4 validation + domain purity (this issue, #58)
-  unit/domain/test_errors.py                   InvalidIpError tests (this issue, #58)
-  unit/application/ports/test_rule_repository.py    port contract tests (this issue, #58)
-  unit/application/use_cases/test_add_ip_use_case.py  AddIpUseCase tests (this issue, #58)
+  unit/domain/entities/test_firewall_rule.py   IPv4 validation + domain purity (#58)
+  unit/domain/test_errors.py                   InvalidIpError tests (#58)
+  unit/application/ports/test_rule_repository.py    port contract tests (#58)
+  unit/application/use_cases/test_add_ip_use_case.py  AddIpUseCase tests (#58)
+  integration/
+    db_test_helpers.py             TEST_DATABASE_URI + the "_test"-suffix safety guard (this issue, #59)
+    test_db_test_helpers.py        pure guard-logic tests, no real database (this issue, #59)
+    adapters/outbound/persistence/postgres/test_sqlalchemy_rule_repository.py
+                                    real PostgreSQL tests against firewall_test (this issue, #59)
   conftest.py                      safe baseline env, so config-dependent test
                                     modules collect regardless of run order
-  integration/
   fixtures/
 ```
 
@@ -76,8 +86,11 @@ Missing or invalid values raise a clear error - listing which field failed and
 why - and stop startup immediately. The error message never includes
 `DATABASE_URI`, passwords, or any other configured value.
 
-This issue only validates configuration shape; no database connection is opened
-here (that's #59).
+`DATABASE_URI` must include the `+psycopg` driver segment (e.g.
+`postgresql+psycopg://user:pass@host:5432/db`) - this service only installs
+`psycopg` (v3), and SQLAlchemy's default driver for a bare `postgresql://` URL
+is `psycopg2`, which isn't installed and would fail at engine-construction
+time.
 
 ## Logging
 
@@ -129,8 +142,8 @@ Python rather than translated line-by-line.
 - **Repository port** (`src/application/ports/rule_repository.py`): an abstract
   `RuleRepository` with exactly one method, `add(rule) -> FirewallRule`.
   Deliberately minimal - just what `AddIpUseCase` needs - not a port of Node's
-  full four-method interface. No concrete (e.g. SQLAlchemy) implementation exists
-  yet; that's Issue #59.
+  full four-method interface. Implemented concretely by
+  `SqlAlchemyRuleRepository` (below, #59).
 - **Use case** (`src/application/use_cases/add_ip_use_case.py`): `AddIpUseCase`
   constructs a `NewFirewallRule` (which validates itself); if that raises
   `InvalidIpError`, the use case - not the domain - catches it and raises
@@ -140,6 +153,47 @@ Python rather than translated line-by-line.
   Logs one structured event either way (`add_ip_rejected` or
   `add_ip_succeeded`) via the Issue #57 logger - `mode` and the rule's `id`/IP
   value only, never a secret.
+
+## PostgreSQL repository
+
+`SqlAlchemyRuleRepository` (`src/adapters/outbound/persistence/postgres/`) is
+the concrete `RuleRepository` implementation, reusing the existing
+`firewall_rules` table exactly as Node's Drizzle schema defines it (`id`,
+`type`, `mode`, `value`, `active`) - no schema changes, no Python migration
+system; `schema.py` maps that table with plain SQLAlchemy Core (`Table`), not
+the ORM. Only this adapter imports SQLAlchemy - domain and application remain
+untouched.
+
+`add(rule)` inserts one row (`type` is always `"ip"` - the only rule type
+ported so far, #58 - `mode`/`value` from the domain rule, `active=true`),
+using `RETURNING` to read back the database-generated `id` in the same
+statement, and maps the result straight into a domain `FirewallRule`. Runs
+inside `engine.begin()`, so a failure rolls back automatically.
+
+`src/main/db.py` builds the SQLAlchemy `Engine` once from `settings.DATABASE_URI`
+(#56) - construction is lazy, so no connection actually opens at import time.
+Nothing in this service prints or logs `str(engine)`/`str(engine.url)`; even if
+something did, SQLAlchemy redacts the password in both by default (verified
+empirically, and locked in by `tests/unit/main/test_db.py`).
+
+### PostgreSQL integration tests
+
+`tests/integration/` runs against a **real** PostgreSQL database, entirely
+separate from the app's own `DATABASE_URI` / `settings` - it reads its own
+`TEST_DATABASE_URI` environment variable (`db_test_helpers.py`), mirroring
+Node's `TEST_DB_*` / `DB_*` separation, so there is no code path by which
+these tests could reach a non-test database through the application's config.
+
+```
+TEST_DATABASE_URI=postgresql+psycopg://user:pass@localhost:5432/firewall_test python -m pytest
+```
+
+**Safety guard:** if `TEST_DATABASE_URI` is set but its database name doesn't
+end with `_test`, the guard module raises immediately at import/collection
+time - before any query runs - refusing to run against `firewall_dev`,
+`firewall_prod`, or anything else not obviously disposable. Left unset, the
+integration tests are skipped and the rest of the suite stays fully offline.
+Each test cleans up every row it inserts.
 
 ## Run
 
@@ -158,7 +212,9 @@ with `env` and `configured_log_level` (never `DATABASE_URI`), then exits 0.
 python -m pytest
 ```
 
-Runs entirely offline against monkeypatched environment variables - no real
-PostgreSQL connection is made or required.
+Unit tests run entirely offline against monkeypatched environment variables -
+no real PostgreSQL connection is made or required. PostgreSQL integration
+tests additionally run when `TEST_DATABASE_URI` is set (see above); otherwise
+they're skipped and the rest of the suite is unaffected.
 
 Full architecture documentation lands in Issue #61.
