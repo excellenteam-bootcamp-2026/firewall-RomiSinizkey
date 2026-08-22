@@ -7,11 +7,12 @@ startup configuration; Issue #57 added structured logging and a reusable applica
 error type; Issue #58 added the first business operation - Add IP - as a domain
 model, an application use case, and a repository port; Issue #59 added the concrete
 SQLAlchemy/PostgreSQL implementation of that port, reusing the existing
-`firewall_rules` table; Issue #60 consolidates the pytest suite, adds an
-end-to-end integration test through the real database, and fixes a
-`pythonpath`/collection gap and a local-`.env` test-isolation bug. The existing
-Node.js API is unchanged and keeps serving all traffic; no schema, migration,
-HTTP, or Docker changes were made.
+`firewall_rules` table; Issue #60 consolidated the pytest suite and added an
+end-to-end integration test through the real database; Issue #61 (this one)
+documents the resulting architecture and traces one Add IP insertion from
+entry point to database - closing out Project 6's foundation phase. The
+existing Node.js API is unchanged and keeps serving all traffic; no schema,
+migration, HTTP, or Docker changes were made anywhere across #55-#61.
 
 ## Structure
 
@@ -265,4 +266,136 @@ test. Fixed with `monkeypatch.setitem(Settings.model_config, "env_file",
 None)`, scoped to that one test only (auto-reverted by pytest afterward) -
 verified with a real `.env` present and absent, both ways passing.
 
-Full architecture documentation lands in Issue #61.
+## Architecture and Add IP trace
+
+### Purpose
+
+`python-rule-service` is an independent Python service that will eventually
+become the sole writer of firewall configuration changes. This foundation
+phase (#55-#61) builds and proves it **in isolation**: the existing Node.js
+API keeps serving 100% of production traffic unchanged, and this service
+proves its one implemented write path - Add IP - only through direct local
+calls (tests and a manual proof), never through a live request.
+
+### What each layer owns
+
+Dependencies point inward only - `main` and `adapters` may depend on
+`application`, which may depend on `domain`; `domain` depends on nothing in
+this service.
+
+| Layer | Owns | Never imports |
+|---|---|---|
+| `src/main` | Composition root: validated config (`config.py`, #56), the structured logger (`logger.py`, #57), the SQLAlchemy `Engine` (`db.py`, #59), and the entry point (`__main__.py`) that wires them together at startup | - |
+| `src/domain` | Framework-independent business rules: `RuleMode`, the self-validating `NewFirewallRule`/`FirewallRule`, `InvalidIpError` | `application/`, `adapters/`, Pydantic, SQLAlchemy, `structlog` - enforced by a source-scanning test, not just convention |
+| `src/application` | `ApplicationError`, the one type a use case is allowed to raise outward | SQLAlchemy, `structlog` internals beyond calling the shared logger |
+| `src/application/ports` | Abstract contracts a use case depends on (`RuleRepository`) - describes *what* must happen, never *how* | Any concrete adapter |
+| `src/application/use_cases` | Orchestration (`AddIpUseCase`): builds the domain object, translates domain errors, calls the port, logs the outcome | SQLAlchemy directly - only ever the abstract port |
+| `src/adapters/outbound/persistence/postgres` | The **only** place SQLAlchemy is imported anywhere in this service: `schema.py` (maps the existing `firewall_rules` table) and `sqlalchemy_rule_repository.py` (`SqlAlchemyRuleRepository`, the concrete `RuleRepository`) | `domain/` or `application/` never import back into this package |
+
+### Add IP trace - one insertion, entry point to database
+
+1. A caller constructs `AddIpUseCase(repository)`. In production that
+   `repository` is a `SqlAlchemyRuleRepository(engine)`, where `engine` is
+   `main/db.py`'s SQLAlchemy `Engine`, built once from `settings.DATABASE_URI`
+   (#56). (No file currently performs this construction automatically - see
+   "What `python -m src.main` does today" below.)
+2. `AddIpUseCase.execute(mode, value)`
+   (`application/use_cases/add_ip_use_case.py`) constructs a
+   `NewFirewallRule(mode=mode, value=value)`.
+3. `NewFirewallRule.__post_init__`
+   (`domain/entities/firewall_rule.py`) validates `value` with Python's
+   standard `ipaddress.IPv4Address` - IPv4 only. Invalid input raises the
+   domain-owned `InvalidIpError` right there, in the domain layer, which never
+   imports `ApplicationError`, SQLAlchemy, or the logger.
+4. Back in the use case: an `InvalidIpError` is caught and translated into
+   `ApplicationError(code="INVALID_IP", message=...)`; a `add_ip_rejected`
+   event is logged and the repository is **never called**. Valid input
+   continues to the next step.
+5. The use case calls `self._repository.add(new_rule)` - typed only as the
+   abstract `RuleRepository` port (`application/ports/rule_repository.py`).
+   The use case has no idea it's talking to PostgreSQL.
+6. `SqlAlchemyRuleRepository.add()`
+   (`adapters/outbound/persistence/postgres/sqlalchemy_rule_repository.py`) -
+   the concrete implementation actually invoked - builds one
+   `INSERT ... RETURNING` statement against the `firewall_rules` `Table`
+   mapping (`schema.py`: `type="ip"`, `mode`/`value` from the domain rule,
+   `active=true`) and executes it inside `engine.begin()`.
+7. The SQLAlchemy `Engine` opens the real connection and runs the statement
+   against PostgreSQL.
+8. PostgreSQL assigns the new row a real, database-generated `id` and returns
+   it via `RETURNING`.
+9. `SqlAlchemyRuleRepository` maps that row into a domain `FirewallRule`
+   (`id`, `mode`, `value`, `active=True`) and returns it back up through the
+   port to the use case, and from there to the original caller.
+10. The use case logs one final structured event, `add_ip_succeeded`, with
+    `mode` and the new `id` only - never a secret.
+
+### Key distinctions
+
+- **`NewFirewallRule` vs. `FirewallRule`** - `NewFirewallRule` is the
+  pre-save input (`mode`, `value`; validates itself on construction, no
+  `id`). `FirewallRule` is the post-save result (adds `id` and `active`,
+  returned only by a repository after a successful write).
+- **`RuleRepository` vs. `SqlAlchemyRuleRepository`** - `RuleRepository` is
+  the abstract port (one method, `add()`, no implementation, no infrastructure
+  knowledge). `SqlAlchemyRuleRepository` is its only concrete implementation
+  and the only module in this entire service that imports SQLAlchemy.
+- **Unit tests vs. PostgreSQL integration tests** - `tests/unit/` (55 tests)
+  make zero network or database calls and always run. `tests/integration/`
+  additionally opens a real PostgreSQL connection and only runs when
+  `TEST_DATABASE_URI` is configured; otherwise those tests are skipped and the
+  rest of the suite is unaffected.
+- **`DATABASE_URI` vs. `TEST_DATABASE_URI`** - `DATABASE_URI` is this
+  service's own application config, validated by `settings` (#56) and used by
+  `main/db.py`'s engine (and, eventually, by `python -m src.main` if it ever
+  wires up a real repository). `TEST_DATABASE_URI` is a completely separate
+  variable read only by `tests/integration/db_test_helpers.py`, decoupled
+  from `settings` entirely, and guarded to require a database name ending in
+  `_test` - there is no code path by which a test could reach whatever
+  database `DATABASE_URI` points at.
+- **`.env.example` vs. `.env`** - `.env.example` is a safe, committed
+  placeholder template (no real credentials). `.env` is the real, gitignored,
+  local-only file a developer creates with `cp .env.example .env` and fills
+  in themselves; it is never committed and this documentation never reads or
+  prints its contents.
+
+### Schema and migration ownership
+
+**Drizzle remains the sole owner of the `firewall_rules` table's schema and
+migrations.** This Python service never creates, alters, or migrates that
+table - `schema.py` only maps it exactly as Drizzle already defines it
+(`id`, `type`, `mode`, `value`, `active`, plus both `CHECK` constraints),
+confirmed directly against the real database, not assumed (#59). No Alembic
+or other Python migration tool exists in this service, and none is planned.
+
+### What `python -m src.main` does today
+
+Running it loads and validates `settings` first (#56) - if that fails, the
+process stops before the logger is even configured. If configuration is
+valid, it configures the logger (#57) and emits exactly one structured event,
+whose real name in the code is `service_startup` (with `env` and
+`configured_log_level`, never `DATABASE_URI`), then exits 0. **It does not
+construct a `SqlAlchemyRuleRepository`, does not call `AddIpUseCase`, and does
+not insert a database row automatically** - wiring the real Add IP flow into
+the entry point has not been required by any issue through #61 and is
+intentionally not done here. The full path traced above is proven only
+through the test suite and through the manual, one-off proof performed during
+verification (see the relevant `AI_CONVERSATION_REPORT.md` entries for #59
+and #61).
+
+### Node.js vs. Python - what moved, what didn't
+
+- **Still entirely in Node.js, unchanged:** HTTP routing (the Express app and
+  all `/api/firewall/*` endpoints), request validation at the HTTP boundary,
+  authentication (none currently exists, and that hasn't changed), and the
+  live endpoints' actual database writes. The Node service continues to serve
+  100% of production traffic exactly as before #55.
+- **Moved to Python, proven in isolation only:** Add IP domain validation,
+  the `AddIpUseCase` orchestration, and persistence into the same
+  `firewall_rules` table via `SqlAlchemyRuleRepository` - exercised only
+  through direct local calls (automated tests plus the manual proof), never
+  through a real HTTP request or production traffic.
+- **Deferred to Project 7 - not designed, not stubbed, not scaffolded:**
+  RabbitMQ, CloudAMQP, Node-to-Python command publication, Python queue
+  consumption, HTTP 202 asynchronous responses, authentication changes, and
+  frontend work.

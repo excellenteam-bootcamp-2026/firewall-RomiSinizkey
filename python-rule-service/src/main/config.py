@@ -28,8 +28,8 @@ class Settings(BaseSettings):
 
     @field_validator("LOG_LEVEL")
     @classmethod
-    def _log_level_supported(cls, valugite: str) -> str:
-        upper = valugite.upper()
+    def _log_level_supported(cls, value: str) -> str:
+        upper = value.upper()
         if upper not in _VALID_LOG_LEVELS:
             raise ValueError(f"must be one of {sorted(_VALID_LOG_LEVELS)}")
         return upper
