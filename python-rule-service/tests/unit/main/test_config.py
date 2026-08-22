@@ -1,13 +1,3 @@
-import os
-
-# Set a safe, non-secret baseline *before* importing src.main.config below - the
-# module validates and constructs its `settings` singleton at import time (the
-# fail-fast behavior this test file exists to verify), so collection itself
-# would fail here without a valid environment already in place.
-os.environ["ENV"] = "dev"
-os.environ["DATABASE_URI"] = "postgresql://test_user:test_pass@localhost:5432/firewall_dev"
-os.environ["LOG_LEVEL"] = "INFO"
-
 import pytest
 from pydantic import ValidationError
 
@@ -106,6 +96,17 @@ class TestDevProductionSafetyGuard:
 
 class TestNoSecretLeakage:
     def test_validation_error_never_contains_the_password(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # This test deletes ENV from os.environ to simulate a missing variable,
+        # then calls load_settings() -> bare Settings() (not _build_settings(),
+        # since it's load_settings()'s own RuntimeError formatting under test).
+        # Bare Settings() still reads python-rule-service/.env by default, so a
+        # developer's real .env with ENV=dev would silently fill the gap this
+        # test creates and the raise would never happen. Disabling env_file for
+        # the duration of this test only (monkeypatch reverts it afterward)
+        # keeps this test isolated from that file without changing what
+        # Settings/load_settings do for real callers like `python -m src.main`.
+        monkeypatch.setitem(Settings.model_config, "env_file", None)
+
         _set_env(monkeypatch, {**VALID_ENV, "ENV": None})
         monkeypatch.setenv("DATABASE_URI", "postgresql://user:SUPERSECRET@host/db")
 
