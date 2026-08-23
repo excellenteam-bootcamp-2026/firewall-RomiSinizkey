@@ -9,6 +9,10 @@ const ENV_KEYS = [
   "DB_USER",
   "DB_PASSWORD",
   "DB_NAME",
+  "CLOUDAMQP_URL",
+  "RABBITMQ_EXCHANGE",
+  "RABBITMQ_QUEUE",
+  "RABBITMQ_ROUTING_PREFIX",
 ] as const;
 
 const VALID_ENV = {
@@ -20,6 +24,10 @@ const VALID_ENV = {
   DB_USER: "app_user",
   DB_PASSWORD: "s3cret-P@ss",
   DB_NAME: "firewall_dev",
+  CLOUDAMQP_URL: "amqps://user:pass@host/vhost",
+  RABBITMQ_EXCHANGE: "firewall.commands",
+  RABBITMQ_QUEUE: "romi.firewall.commands",
+  RABBITMQ_ROUTING_PREFIX: "romi",
 };
 
 // Deletes the known keys first, then applies only the given overrides, so a
@@ -81,13 +89,33 @@ describe("env.ts", () => {
     });
   });
 
-  it("only exposes env, port, dbConnectionIntervalMs, and database", async () => {
+  it("only exposes env, port, dbConnectionIntervalMs, database, and rabbitmq", async () => {
     setEnv(VALID_ENV);
 
     const config = await loadConfig();
 
-    expect(Object.keys(config).sort()).toEqual(["database", "dbConnectionIntervalMs", "env", "port"]);
+    expect(Object.keys(config).sort()).toEqual([
+      "database",
+      "dbConnectionIntervalMs",
+      "env",
+      "port",
+      "rabbitmq",
+    ]);
     expect(Object.keys(config.database).sort()).toEqual(["database", "host", "password", "port", "user"]);
+    expect(Object.keys(config.rabbitmq).sort()).toEqual(["exchange", "queue", "routingPrefix", "url"]);
+  });
+
+  it("resolves config.rabbitmq from the CLOUDAMQP_URL/RABBITMQ_* group", async () => {
+    setEnv(VALID_ENV);
+
+    const config = await loadConfig();
+
+    expect(config.rabbitmq).toEqual({
+      url: "amqps://user:pass@host/vhost",
+      exchange: "firewall.commands",
+      queue: "romi.firewall.commands",
+      routingPrefix: "romi",
+    });
   });
 
   it("throws when ENV is missing", async () => {
@@ -162,6 +190,54 @@ describe("env.ts", () => {
     await expect(loadConfig()).rejects.toThrow();
   });
 
+  it("throws when CLOUDAMQP_URL is missing", async () => {
+    setEnv({ ...VALID_ENV, CLOUDAMQP_URL: undefined });
+
+    await expect(loadConfig()).rejects.toThrow();
+  });
+
+  it("throws when CLOUDAMQP_URL is blank", async () => {
+    setEnv({ ...VALID_ENV, CLOUDAMQP_URL: "" });
+
+    await expect(loadConfig()).rejects.toThrow();
+  });
+
+  it("throws when RABBITMQ_EXCHANGE is missing", async () => {
+    setEnv({ ...VALID_ENV, RABBITMQ_EXCHANGE: undefined });
+
+    await expect(loadConfig()).rejects.toThrow();
+  });
+
+  it("throws when RABBITMQ_EXCHANGE is blank", async () => {
+    setEnv({ ...VALID_ENV, RABBITMQ_EXCHANGE: "" });
+
+    await expect(loadConfig()).rejects.toThrow();
+  });
+
+  it("throws when RABBITMQ_QUEUE is missing", async () => {
+    setEnv({ ...VALID_ENV, RABBITMQ_QUEUE: undefined });
+
+    await expect(loadConfig()).rejects.toThrow();
+  });
+
+  it("throws when RABBITMQ_QUEUE is blank", async () => {
+    setEnv({ ...VALID_ENV, RABBITMQ_QUEUE: "" });
+
+    await expect(loadConfig()).rejects.toThrow();
+  });
+
+  it("throws when RABBITMQ_ROUTING_PREFIX is missing", async () => {
+    setEnv({ ...VALID_ENV, RABBITMQ_ROUTING_PREFIX: undefined });
+
+    await expect(loadConfig()).rejects.toThrow();
+  });
+
+  it("throws when RABBITMQ_ROUTING_PREFIX is blank", async () => {
+    setEnv({ ...VALID_ENV, RABBITMQ_ROUTING_PREFIX: "" });
+
+    await expect(loadConfig()).rejects.toThrow();
+  });
+
   it("a validation-failure error never contains the configured password value", async () => {
     // DB_HOST is what's invalid here; DB_PASSWORD is still a valid, real-looking
     // secret in process.env at the time env.ts throws — the error message must
@@ -191,6 +267,18 @@ describe("env.ts", () => {
 
     expect(() => {
       (config.database as unknown as { host: string }).host = "changed";
+    }).toThrow(TypeError);
+  });
+
+  it("exports a frozen rabbitmq sub-object", async () => {
+    setEnv(VALID_ENV);
+
+    const config = await loadConfig();
+
+    expect(Object.isFrozen(config.rabbitmq)).toBe(true);
+
+    expect(() => {
+      (config.rabbitmq as unknown as { url: string }).url = "changed";
     }).toThrow(TypeError);
   });
 });

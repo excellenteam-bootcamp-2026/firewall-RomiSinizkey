@@ -283,6 +283,12 @@ with a descriptive error if any are missing or invalid. See `.env.example` for t
 | `DB_USER` | PostgreSQL username. |
 | `DB_PASSWORD` | PostgreSQL password. |
 | `DB_NAME` | PostgreSQL database name. |
+| `CLOUDAMQP_URL` | Connection URL for the CloudAMQP-hosted RabbitMQ instance (Project 7). |
+| `RABBITMQ_EXCHANGE` | The direct exchange commands are published to (`firewall.commands`). |
+| `RABBITMQ_QUEUE` | This student/project's durable queue name. |
+| `RABBITMQ_ROUTING_PREFIX` | Student-specific routing-key prefix, so a shared CloudAMQP instance only routes commands to this queue. |
+
+RabbitMQ itself is hosted by [CloudAMQP — https://www.cloudamqp.com/](https://www.cloudamqp.com/); there is no local RabbitMQ installation or Docker container in this project's setup.
 
 ### Integration-test-only variables
 

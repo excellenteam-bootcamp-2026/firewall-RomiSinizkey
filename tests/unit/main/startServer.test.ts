@@ -1,6 +1,19 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
-const ENV_KEYS = ["ENV", "PORT", "DB_CONNECTION_INTERVAL", "DB_HOST", "DB_PORT", "DB_USER", "DB_PASSWORD", "DB_NAME"] as const;
+const ENV_KEYS = [
+  "ENV",
+  "PORT",
+  "DB_CONNECTION_INTERVAL",
+  "DB_HOST",
+  "DB_PORT",
+  "DB_USER",
+  "DB_PASSWORD",
+  "DB_NAME",
+  "CLOUDAMQP_URL",
+  "RABBITMQ_EXCHANGE",
+  "RABBITMQ_QUEUE",
+  "RABBITMQ_ROUTING_PREFIX",
+] as const;
 
 const VALID_ENV = {
   ENV: "dev",
@@ -11,6 +24,10 @@ const VALID_ENV = {
   DB_USER: "app_user",
   DB_PASSWORD: "s3cret-P@ss",
   DB_NAME: "firewall_dev",
+  CLOUDAMQP_URL: "amqps://user:pass@host/vhost",
+  RABBITMQ_EXCHANGE: "firewall.commands",
+  RABBITMQ_QUEUE: "romi.firewall.commands",
+  RABBITMQ_ROUTING_PREFIX: "romi",
 };
 
 function setEnv(overrides: Partial<Record<(typeof ENV_KEYS)[number], string>>): void {
