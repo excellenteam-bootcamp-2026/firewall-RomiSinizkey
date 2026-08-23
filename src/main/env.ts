@@ -9,6 +9,10 @@ const envSchema = z.object({
   DB_USER: z.string().min(1),
   DB_PASSWORD: z.string().min(1),
   DB_NAME: z.string().min(1),
+  CLOUDAMQP_URL: z.string().min(1),
+  RABBITMQ_EXCHANGE: z.string().min(1),
+  RABBITMQ_QUEUE: z.string().min(1),
+  RABBITMQ_ROUTING_PREFIX: z.string().min(1),
 });
 
 function formatIssues(issues: { path: PropertyKey[]; message: string }[]): string {
@@ -38,5 +42,11 @@ export const config = Object.freeze({
     user: env.DB_USER,
     password: env.DB_PASSWORD,
     database: env.DB_NAME,
+  }),
+  rabbitmq: Object.freeze({
+    url: env.CLOUDAMQP_URL,
+    exchange: env.RABBITMQ_EXCHANGE,
+    queue: env.RABBITMQ_QUEUE,
+    routingPrefix: env.RABBITMQ_ROUTING_PREFIX,
   }),
 });

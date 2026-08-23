@@ -13,6 +13,10 @@ const ENV_KEYS = [
   "DB_USER",
   "DB_PASSWORD",
   "DB_NAME",
+  "CLOUDAMQP_URL",
+  "RABBITMQ_EXCHANGE",
+  "RABBITMQ_QUEUE",
+  "RABBITMQ_ROUTING_PREFIX",
 ] as const;
 
 // One shared DB_* group — the same variable names are valid regardless of
@@ -26,6 +30,10 @@ const VALID_ENV = {
   DB_USER: "user",
   DB_PASSWORD: "password",
   DB_NAME: "firewall_dev",
+  CLOUDAMQP_URL: "amqps://user:pass@host/vhost",
+  RABBITMQ_EXCHANGE: "firewall.commands",
+  RABBITMQ_QUEUE: "romi.firewall.commands",
+  RABBITMQ_ROUTING_PREFIX: "romi",
 };
 
 function setEnv(overrides: Partial<Record<(typeof ENV_KEYS)[number], string>>): void {

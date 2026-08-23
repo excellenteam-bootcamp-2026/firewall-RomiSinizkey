@@ -77,15 +77,21 @@ Copy the placeholder template and fill in real local values - `.env` is gitignor
 cp .env.example .env
 ```
 
-Three variables, validated once at startup by `src/main/config.py` via Pydantic /
-pydantic-settings, and exported as a single immutable `settings` object. Nothing
-else in the service reads `os.environ` directly.
+Validated once at startup by `src/main/config.py` via Pydantic / pydantic-settings,
+and exported as a single immutable `settings` object. Nothing else in the service
+reads `os.environ` directly.
 
 | Variable       | Validation                                                                 |
 |----------------|-----------------------------------------------------------------------------|
 | `ENV`          | must be exactly `dev` or `production`                                       |
 | `DATABASE_URI` | required, non-blank PostgreSQL connection string                            |
 | `LOG_LEVEL`    | must be one of `DEBUG`/`INFO`/`WARNING`/`ERROR`/`CRITICAL` (case-insensitive, normalized to uppercase) |
+| `CLOUDAMQP_URL` | required, non-blank connection URL for the CloudAMQP-hosted RabbitMQ instance (Project 7) |
+| `RABBITMQ_EXCHANGE` | required, non-blank - the direct exchange this service consumes from (`firewall.commands`) |
+| `RABBITMQ_QUEUE` | required, non-blank - this student/project's durable queue name |
+| `RABBITMQ_ROUTING_PREFIX` | required, non-blank - student-specific routing-key prefix |
+
+RabbitMQ itself is hosted by [CloudAMQP — https://www.cloudamqp.com/](https://www.cloudamqp.com/); there is no local RabbitMQ installation or Docker container in this project's setup.
 
 `ENV=dev` additionally refuses to start if `DATABASE_URI`'s database name looks
 production (contains `prod`) - a safety guard against a development run

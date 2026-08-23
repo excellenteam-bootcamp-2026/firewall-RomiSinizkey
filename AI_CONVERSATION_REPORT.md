@@ -1,4 +1,4 @@
-# AI Conversation Report — Issue #61
+# AI Conversation Report — Issue #70
 
 ## Purpose
 
@@ -7,94 +7,113 @@ request; their full history remains available via `git log` on `main`, where eac
 when its PR merged. No secrets, passwords, credentials, or environment-variable values appear
 below.
 
-## Issue #61: Document and verify the Python service architecture
+## Issue #70: [RabbitMQ] Configure CloudAMQP exchange, queue, and environment variables
 
-**Objective:** write the final architecture documentation for `python-rule-service` (#55–#60) and
-trace one Add IP insertion from entry point to database, naming which file/layer owns each step —
-documentation only, no new business logic, no production code change unless verification revealed
-a genuine defect (it did not).
+**Objective:** extend both services' validated configuration to know about the four RabbitMQ/
+CloudAMQP settings Project 7 needs (`CLOUDAMQP_URL`, `RABBITMQ_EXCHANGE`, `RABBITMQ_QUEUE`,
+`RABBITMQ_ROUTING_PREFIX`) — configuration only, so every later Project 7 issue (publisher,
+consumer, endpoint refactor) has real, validated config to build against.
 
-**AI collaboration on this issue:** Claude Code performed the entire investigation, documentation,
-and verification below in this session — reading every source and test file, writing the new
-architecture section, and running all listed checks directly. No separate ChatGPT conversation
-content was provided for this issue, unlike a few earlier issues in this project's history (e.g.
-#45, #58) whose reports documented a ChatGPT explanatory pass; nothing is invented here to imply
-one occurred.
+**AI collaboration on this issue:** Claude Code performed the entire investigation and
+implementation below in this session, directed by an explicit, itemized specification from the
+repository owner (exact schema fields, exact `config.rabbitmq` shape, exact `.env.example`
+placeholder values, exact test coverage expectations). No separate ChatGPT conversation content
+was provided or is implied for this issue.
 
-**A wording discrepancy caught before writing anything, not carried forward:** the issue's own
-task description states the entry point "emits `service_started`." The actual code
-(`src/main/__main__.py`) emits an event literally named `service_startup` — confirmed by reading
-the source and by re-running the entry point live. The documentation below uses the real name from
-the code, per this issue's own instruction to state things accurately rather than repeat the given
-wording uncritically.
+**Scope check performed before writing:** the issue explicitly excludes CloudAMQP resource
+creation, `amqplib`/`aio-pika` installation, publisher/consumer code, `operation_id`, and any
+change to `POST /api/firewall/ips` — all confirmed out of scope and not touched. Nothing was
+committed, pushed, or staged; real `.env`/`.env.dev`/`.env.prod`/`python-rule-service/.env` files
+were not created, read, or modified.
 
-**Scope check performed before writing:** Issue #61's own acceptance criteria name only
-`python-rule-service/README.md` as the deliverable (structure, trace, Node-vs-Python split, env
-vars, test commands) — `Project6-Dockerization-Plan.pdf` is not mentioned anywhere in scope, so it
-was left untouched, and the original course brief PDF was not opened, since the GitHub issue body
-is self-contained and authoritative.
+**Config changes:**
+- `src/main/env.ts` — added the four variables to the zod schema (`z.string().min(1)`, matching
+  the existing `DB_HOST`-style pattern) and a new frozen `config.rabbitmq` section
+  (`{ url, exchange, queue, routingPrefix }`).
+- `python-rule-service/src/main/config.py` — added the same four fields to `Settings` as `str`,
+  plus one shared `@field_validator` covering blank-value rejection for all four, styled after the
+  existing `_database_uri_not_blank` validator. `DATABASE_URI`/`LOG_LEVEL` validation untouched.
 
-**Documentation added** — one new consolidated section, "Architecture and Add IP trace," appended
-to `python-rule-service/README.md` in place of its previous one-line forward-reference to this
-issue:
-- A layer-responsibility table for `src/main`, `src/domain`, `src/application`,
-  `src/application/ports`, `src/application/use_cases`, and
-  `src/adapters/outbound/persistence/postgres`, including what each layer must never import.
-- A 10-step numbered trace of one Add IP insertion, naming the exact file responsible at each step,
-  from `AddIpUseCase.execute()` through `NewFirewallRule` validation, the `RuleRepository` port,
-  `SqlAlchemyRuleRepository`, the SQLAlchemy `Engine`, PostgreSQL, and back to a domain
-  `FirewallRule`.
-- Five explicit distinctions, each with its own paragraph: `NewFirewallRule` vs. `FirewallRule`;
-  `RuleRepository` vs. `SqlAlchemyRuleRepository`; unit vs. PostgreSQL integration tests;
-  `DATABASE_URI` vs. `TEST_DATABASE_URI`; `.env.example` vs. `.env`.
-- An explicit statement that Drizzle remains the sole owner of the `firewall_rules` schema and
-  migrations, and that this service has no Python migration tool.
-- An explicit statement of what `python -m src.main` does and does not do today - it loads
-  config, configures logging, and emits one `service_startup` event, and it does **not** construct
-  a repository, call `AddIpUseCase`, or write to the database automatically.
-- A Node-vs-Python scope split: what's still entirely in Node.js (HTTP routing, auth, live writes),
-  what moved to Python but is proven only in isolation (Add IP domain + persistence, local calls
-  only), and what's deferred to Project 7 (RabbitMQ, CloudAMQP, queue consumption, HTTP 202, auth
-  changes, frontend).
+**Example env files:**
+- `.env.example` and `python-rule-service/.env.example` — added the four variables with
+  placeholder-only values, under a one-line comment noting real credentials must never be
+  committed.
+
+**Documentation:**
+- `README.md` and `python-rule-service/README.md` — added the four variables to each existing
+  environment-variable table, plus one line naming CloudAMQP as the RabbitMQ host with no local
+  RabbitMQ install/container in this project's setup. No larger rewrite.
+
+**Tests added/updated** — every existing call site that constructs either config object needed the
+four new keys or it would fail with "missing required variable," since both are required-by-default
+now:
+- `tests/unit/main/env.test.ts` — extended the shared `ENV_KEYS`/`VALID_ENV` fixture; added tests
+  for valid RabbitMQ config resolving into `config.rabbitmq`, missing/blank cases for each of the
+  four variables, `config.rabbitmq` frozen, and updated the config key-shape test.
+- `tests/unit/main/Logger.test.ts`, `tests/unit/main/startServer.test.ts`,
+  `tests/unit/adapters/outbound/persistence/postgres/connection.test.ts` — each duplicates its own
+  local `ENV_KEYS`/`VALID_ENV` fixture (pre-existing repo pattern) to build a real `config` for
+  testing `Logger`/`startServer`/`PostgresConnection`; all three needed the four new keys added to
+  keep passing.
+- `python-rule-service/tests/unit/main/test_config.py` — extended `ENV_KEYS`/`VALID_ENV` (the
+  existing parametrized missing-variable test automatically now covers all four new vars too);
+  added a blank-value test for each of the four; extended the valid-config test to assert the new
+  fields load; fixed `test_production_env_accepts_a_production_database`, which built its override
+  dict from scratch without the new keys and would otherwise have started failing for reasons
+  unrelated to what it actually tests.
+- `python-rule-service/tests/conftest.py` — added `setdefault()` calls for the four new vars,
+  alongside the existing `ENV`/`DATABASE_URI`/`LOG_LEVEL` ones; this file's whole purpose is
+  letting the entire suite import `src.main.config`'s module-level `settings` singleton without a
+  real `.env`, so this was necessary for the full suite to keep collecting, not just the new tests.
 
 **Files changed:**
-- `python-rule-service/README.md` — new "Architecture and Add IP trace" section; intro paragraph
-  updated to reference #61 as the phase's closing issue.
+- `src/main/env.ts`
+- `tests/unit/main/env.test.ts`, `tests/unit/main/Logger.test.ts`,
+  `tests/unit/main/startServer.test.ts`,
+  `tests/unit/adapters/outbound/persistence/postgres/connection.test.ts`
+- `.env.example`
+- `README.md`
+- `python-rule-service/src/main/config.py`
+- `python-rule-service/tests/unit/main/test_config.py`
+- `python-rule-service/tests/conftest.py`
+- `python-rule-service/.env.example`
+- `python-rule-service/README.md`
 - `AI_CONVERSATION_REPORT.md` — this file.
 
-**No production code was changed.** Verification below found no defect — the entry point's actual
-behavior matches what was already documented from #57 (it emits `service_startup`; the issue's own
-task text just paraphrased that name inaccurately, as noted above).
+**No CloudAMQP resource, no `amqplib`/`aio-pika` dependency, and no publisher/consumer/endpoint
+code was added.** This is a pure config-and-tests change.
 
 **Verification performed:**
 ```
-pytest (no TEST_DATABASE_URI)                → 63 passed, 5 skipped
-python -m src.main (real local .env present)  → started correctly, printed the documented
-                                                  service_startup event, exit 0
-pytest (TEST_DATABASE_URI=...firewall_test)   → 68 passed, 0 skipped
-Safety guard re-check: TEST_DATABASE_URI pointed at firewall_dev → refused immediately at
-                                                  conftest load, before any test collected
-npm run lint   → passed
-npm run build  → passed
-npm test        → 178 passed, 17 skipped, 0 failed
+npm run lint                       → passed
+npm test                           → 188 passed, 17 skipped, 0 failed
+                                      (one Logger.test.ts Singleton test timed out on the first
+                                      full-suite run — a pre-existing cold-import CPU-contention
+                                      flake already documented in vitest.config.mts's own comments,
+                                      not a regression; passed in isolation and on immediate re-run)
+python -m pytest -q (python-rule-service, via .venv)
+                                    → 71 passed, 5 skipped
 ```
-
-**Manual database proof**, through the real composition (`AddIpUseCase` →
-`SqlAlchemyRuleRepository` → `firewall_test` only): inserted one whitelist rule, independently
-re-verified the exact row via a raw `psycopg` connection, deleted it, and confirmed zero rows
-remained. `firewall_dev` and `firewall_prod` were never touched.
+Skipped tests in both suites are the guarded real-PostgreSQL integration tests
+(`DrizzleRuleRepository.test.ts`, `test_sqlalchemy_rule_repository.py`,
+`test_add_ip_end_to_end.py`), which skip cleanly with no `TEST_DB_*`/`TEST_DATABASE_URI`
+configured — unrelated to this change, pre-existing behavior.
 
 **Limitations / remaining gaps, stated plainly, not left implicit:**
-- `AddIpUseCase` is still not wired into `python -m src.main` or any other automatic entry point -
-  by design, and explicitly out of scope for #55–#61.
-- `config.py`'s `LOG_LEVEL` validator parameter name: `valugite` is the version currently committed
-  on `main` (merged via PR #66, commit `8938905`). The current Issue #61 branch corrects it to
-  `value` - a readability-only parameter-name correction with no behavior change, since Python
-  does not care what a local parameter is named as long as it's used consistently within the
-  function. All 13 `tests/unit/main/test_config.py` tests pass after the correction. Earlier
-  reports (#58/#59/#60) described this drift's direction backwards - stating the uncommitted
-  change introduced `valugite` - when the opposite is true; this entry corrects that record.
-- This closes the planned foundation-phase documentation (#55–#61); Phase 7 work (RabbitMQ,
-  CloudAMQP, HTTP 202, frontend) remains entirely undesigned, as intended.
+- `.env.dev.example`/`.env.prod.example` (the Docker Compose templates) were intentionally left
+  untouched per the issue's exact file scope, but `env.ts` now requires the four RabbitMQ variables
+  unconditionally — `npm run dev:docker` and the production Docker image will fail fast at startup
+  until those two templates (and the real `.env.dev`/`.env.prod`) also carry the four new keys.
+  Flagged for a follow-up, not fixed here.
+- `src/main/migrate.ts` also imports `config` from `./env`, so `npm run db:migrate`/`db:migrate:dev`
+  now also require the RabbitMQ variables to be set, even though migrations have nothing to do with
+  RabbitMQ — an inherent consequence of the fields being required-by-default, not something fixable
+  within this issue's scope.
+- `python-rule-service/.env.local-backup` exists as a stray untracked file; not opened this
+  session. Confirmed correctly gitignored (caught by the root `.gitignore`'s `.env.*` rule via
+  `git check-ignore`), so no leak risk, but worth deleting once no longer needed.
+- CloudAMQP resources (exchange, queue, binding) are not yet created — real values for the four
+  variables will be added to the real, gitignored `.env`/`python-rule-service/.env` files manually,
+  outside this session, once that provisioning happens.
 
 Nothing was staged, committed, pushed, or changed on GitHub for this work.

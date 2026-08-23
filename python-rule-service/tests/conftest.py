@@ -9,3 +9,7 @@ import os
 os.environ.setdefault("ENV", "dev")
 os.environ.setdefault("DATABASE_URI", "postgresql+psycopg://test_user:test_pass@localhost:5432/firewall_dev")
 os.environ.setdefault("LOG_LEVEL", "INFO")
+os.environ.setdefault("CLOUDAMQP_URL", "amqps://user:pass@host/vhost")
+os.environ.setdefault("RABBITMQ_EXCHANGE", "firewall.commands")
+os.environ.setdefault("RABBITMQ_QUEUE", "romi.firewall.commands")
+os.environ.setdefault("RABBITMQ_ROUTING_PREFIX", "romi")

@@ -3,12 +3,24 @@ from pydantic import ValidationError
 
 from src.main.config import Settings, load_settings, settings
 
-ENV_KEYS = ("ENV", "DATABASE_URI", "LOG_LEVEL")
+ENV_KEYS = (
+    "ENV",
+    "DATABASE_URI",
+    "LOG_LEVEL",
+    "CLOUDAMQP_URL",
+    "RABBITMQ_EXCHANGE",
+    "RABBITMQ_QUEUE",
+    "RABBITMQ_ROUTING_PREFIX",
+)
 
 VALID_ENV = {
     "ENV": "dev",
     "DATABASE_URI": "postgresql://test_user:test_pass@localhost:5432/firewall_dev",
     "LOG_LEVEL": "INFO",
+    "CLOUDAMQP_URL": "amqps://user:pass@host/vhost",
+    "RABBITMQ_EXCHANGE": "firewall.commands",
+    "RABBITMQ_QUEUE": "romi.firewall.commands",
+    "RABBITMQ_ROUTING_PREFIX": "romi",
 }
 
 
@@ -26,12 +38,16 @@ def _build_settings(monkeypatch: pytest.MonkeyPatch, overrides: dict) -> Setting
 
 
 class TestValidConfiguration:
-    def test_loads_all_three_fields(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_loads_all_fields(self, monkeypatch: pytest.MonkeyPatch) -> None:
         result = _build_settings(monkeypatch, VALID_ENV)
 
         assert result.ENV == "dev"
         assert result.DATABASE_URI == VALID_ENV["DATABASE_URI"]
         assert result.LOG_LEVEL == "INFO"
+        assert result.CLOUDAMQP_URL == VALID_ENV["CLOUDAMQP_URL"]
+        assert result.RABBITMQ_EXCHANGE == VALID_ENV["RABBITMQ_EXCHANGE"]
+        assert result.RABBITMQ_QUEUE == VALID_ENV["RABBITMQ_QUEUE"]
+        assert result.RABBITMQ_ROUTING_PREFIX == VALID_ENV["RABBITMQ_ROUTING_PREFIX"]
 
     def test_log_level_is_case_insensitive_and_normalized(self, monkeypatch: pytest.MonkeyPatch) -> None:
         result = _build_settings(monkeypatch, {**VALID_ENV, "LOG_LEVEL": "debug"})
@@ -62,6 +78,16 @@ class TestInvalidLogLevel:
             _build_settings(monkeypatch, {**VALID_ENV, "LOG_LEVEL": "VERBOSE"})
 
 
+class TestBlankRabbitMqSettings:
+    @pytest.mark.parametrize(
+        "blank_key",
+        ("CLOUDAMQP_URL", "RABBITMQ_EXCHANGE", "RABBITMQ_QUEUE", "RABBITMQ_ROUTING_PREFIX"),
+    )
+    def test_blank_value_raises(self, monkeypatch: pytest.MonkeyPatch, blank_key: str) -> None:
+        with pytest.raises(ValidationError):
+            _build_settings(monkeypatch, {**VALID_ENV, blank_key: "   "})
+
+
 class TestImmutability:
     def test_settings_instance_is_frozen(self, monkeypatch: pytest.MonkeyPatch) -> None:
         result = _build_settings(monkeypatch, VALID_ENV)
@@ -84,9 +110,9 @@ class TestDevProductionSafetyGuard:
 
     def test_production_env_accepts_a_production_database(self, monkeypatch: pytest.MonkeyPatch) -> None:
         overrides = {
+            **VALID_ENV,
             "ENV": "production",
             "DATABASE_URI": "postgresql://u:p@host:5432/firewall_prod",
-            "LOG_LEVEL": "INFO",
         }
 
         result = _build_settings(monkeypatch, overrides)

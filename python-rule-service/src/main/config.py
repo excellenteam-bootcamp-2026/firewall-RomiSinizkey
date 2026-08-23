@@ -18,10 +18,21 @@ class Settings(BaseSettings):
     ENV: Literal["dev", "production"]
     DATABASE_URI: str
     LOG_LEVEL: str
+    CLOUDAMQP_URL: str
+    RABBITMQ_EXCHANGE: str
+    RABBITMQ_QUEUE: str
+    RABBITMQ_ROUTING_PREFIX: str
 
     @field_validator("DATABASE_URI")
     @classmethod
     def _database_uri_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must not be blank")
+        return value
+
+    @field_validator("CLOUDAMQP_URL", "RABBITMQ_EXCHANGE", "RABBITMQ_QUEUE", "RABBITMQ_ROUTING_PREFIX")
+    @classmethod
+    def _rabbitmq_settings_not_blank(cls, value: str) -> str:
         if not value.strip():
             raise ValueError("must not be blank")
         return value
