@@ -52,6 +52,9 @@ const fakes = vi.hoisted(() => {
     lastCreateAppRepository: unknown;
     closeImpl: (cb: (err?: Error) => void) => void;
     closeCalls: number;
+    publisherConnectImpl: () => Promise<void>;
+    publisherCloseCalls: number;
+    lastPublisherConfig: unknown;
   } = {
     callOrder: [],
     connectImpl: async () => {
@@ -63,6 +66,9 @@ const fakes = vi.hoisted(() => {
     lastCreateAppRepository: undefined,
     closeImpl: (cb) => cb(),
     closeCalls: 0,
+    publisherConnectImpl: async () => undefined,
+    publisherCloseCalls: 0,
+    lastPublisherConfig: undefined,
   };
 
   class FakeDrizzleRuleRepository {
@@ -75,6 +81,22 @@ const fakes = vi.hoisted(() => {
     close = vi.fn((cb: (err?: Error) => void) => {
       state.closeCalls += 1;
       state.closeImpl(cb);
+    });
+  }
+
+  class FakeRabbitMqCommandPublisher {
+    constructor(config: unknown) {
+      state.lastPublisherConfig = config;
+    }
+
+    connect = vi.fn(async () => {
+      state.callOrder.push("rabbitmqConnect");
+      return state.publisherConnectImpl();
+    });
+
+    close = vi.fn(async () => {
+      state.callOrder.push("rabbitmqClose");
+      state.publisherCloseCalls += 1;
     });
   }
 
@@ -103,7 +125,7 @@ const fakes = vi.hoisted(() => {
 
   const loggerMock = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
 
-  return { state, FakeDrizzleRuleRepository, postgresConnection, createApp, loggerMock };
+  return { state, FakeDrizzleRuleRepository, FakeRabbitMqCommandPublisher, postgresConnection, createApp, loggerMock };
 });
 
 vi.mock("../../../src/adapters/outbound/persistence/postgres/connection", () => ({
@@ -111,6 +133,9 @@ vi.mock("../../../src/adapters/outbound/persistence/postgres/connection", () => 
 }));
 vi.mock("../../../src/adapters/outbound/persistence/postgres/DrizzleRuleRepository", () => ({
   DrizzleRuleRepository: fakes.FakeDrizzleRuleRepository,
+}));
+vi.mock("../../../src/adapters/outbound/rabbitmq/RabbitMqCommandPublisher", () => ({
+  RabbitMqCommandPublisher: fakes.FakeRabbitMqCommandPublisher,
 }));
 vi.mock("../../../src/adapters/inbound/http/app", () => ({ createApp: fakes.createApp }));
 vi.mock("../../../src/main/Logger", () => ({ logger: fakes.loggerMock }));
@@ -131,6 +156,9 @@ describe("startServer", () => {
     fakes.state.lastCreateAppRepository = undefined;
     fakes.state.closeImpl = (cb) => cb();
     fakes.state.connectImpl = async () => fakes.state.fakeDb;
+    fakes.state.publisherConnectImpl = async () => undefined;
+    fakes.state.publisherCloseCalls = 0;
+    fakes.state.lastPublisherConfig = undefined;
     fakes.postgresConnection.connect.mockClear();
     fakes.postgresConnection.shutdown.mockClear();
     fakes.createApp.mockClear();
@@ -150,13 +178,13 @@ describe("startServer", () => {
     registeredForCleanup.length = 0;
   });
 
-  it("awaits postgresConnection.connect() before createApp/listen run", async () => {
+  it("awaits postgresConnection.connect() and the RabbitMQ publisher's connect() before createApp/listen run", async () => {
     const { startServer } = await loadStartServer();
 
     const result = await startServer();
     registeredForCleanup.push(result);
 
-    expect(fakes.state.callOrder).toEqual(["connect", "createApp", "listen"]);
+    expect(fakes.state.callOrder).toEqual(["connect", "rabbitmqConnect", "createApp", "listen"]);
   });
 
   it("constructs DrizzleRuleRepository with the db resolved by connect(), and injects it into createApp", async () => {
@@ -169,8 +197,32 @@ describe("startServer", () => {
     expect(fakes.state.lastCreateAppRepository).toBeInstanceOf(fakes.FakeDrizzleRuleRepository);
   });
 
+  it("constructs RabbitMqCommandPublisher from config.rabbitmq", async () => {
+    const { startServer } = await loadStartServer();
+
+    const result = await startServer();
+    registeredForCleanup.push(result);
+
+    expect(fakes.state.lastPublisherConfig).toEqual({
+      url: "amqps://user:pass@host/vhost",
+      exchange: "firewall.commands",
+      routingPrefix: "romi",
+    });
+  });
+
   it("does not call createApp or listen when the database connection fails", async () => {
     fakes.state.connectImpl = async () => {
+      throw new Error("connection refused");
+    };
+    const { startServer } = await loadStartServer();
+
+    await expect(startServer()).rejects.toThrow("connection refused");
+
+    expect(fakes.createApp).not.toHaveBeenCalled();
+  });
+
+  it("does not call createApp or listen when the RabbitMQ publisher fails to connect", async () => {
+    fakes.state.publisherConnectImpl = async () => {
       throw new Error("connection refused");
     };
     const { startServer } = await loadStartServer();
@@ -189,7 +241,7 @@ describe("startServer", () => {
     await expect(startServer()).rejects.toThrow();
   });
 
-  it("shutdown() closes the HTTP server and the PostgreSQL pool", async () => {
+  it("shutdown() closes the HTTP server, the RabbitMQ publisher, and the PostgreSQL pool", async () => {
     const { startServer } = await loadStartServer();
     const result = await startServer();
     registeredForCleanup.push(result);
@@ -197,6 +249,7 @@ describe("startServer", () => {
     await result.shutdown();
 
     expect(fakes.state.closeCalls).toBe(1);
+    expect(fakes.state.publisherCloseCalls).toBe(1);
     expect(fakes.state.shutdownCalls).toBe(1);
   });
 
@@ -209,10 +262,11 @@ describe("startServer", () => {
     await result.shutdown();
 
     expect(fakes.state.closeCalls).toBe(1);
+    expect(fakes.state.publisherCloseCalls).toBe(1);
     expect(fakes.state.shutdownCalls).toBe(1);
   });
 
-  it("still closes the PostgreSQL pool even if httpServer.close() fails", async () => {
+  it("still closes the RabbitMQ publisher and the PostgreSQL pool even if httpServer.close() fails", async () => {
     fakes.state.closeImpl = (cb) => cb(new Error("close failed"));
     const { startServer } = await loadStartServer();
     const result = await startServer();
@@ -220,10 +274,11 @@ describe("startServer", () => {
 
     await expect(result.shutdown()).rejects.toThrow("close failed");
 
+    expect(fakes.state.publisherCloseCalls).toBe(1);
     expect(fakes.state.shutdownCalls).toBe(1);
   });
 
-  it("SIGINT triggers the same shutdown behavior, closing both resources exactly once", async () => {
+  it("SIGINT triggers the same shutdown behavior, closing all resources exactly once", async () => {
     const { startServer } = await loadStartServer();
     const result = await startServer();
     registeredForCleanup.push(result);
@@ -233,6 +288,7 @@ describe("startServer", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(fakes.state.closeCalls).toBe(1);
+    expect(fakes.state.publisherCloseCalls).toBe(1);
     expect(fakes.state.shutdownCalls).toBe(1);
   });
 
@@ -248,6 +304,7 @@ describe("startServer", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(fakes.state.closeCalls).toBe(1);
+    expect(fakes.state.publisherCloseCalls).toBe(1);
     expect(fakes.state.shutdownCalls).toBe(1);
   });
 });

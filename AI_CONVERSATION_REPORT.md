@@ -1,4 +1,4 @@
-# AI Conversation Report — Issue #70
+# AI Conversation Report — Issue #71
 
 ## Purpose
 
@@ -7,113 +7,106 @@ request; their full history remains available via `git log` on `main`, where eac
 when its PR merged. No secrets, passwords, credentials, or environment-variable values appear
 below.
 
-## Issue #70: [RabbitMQ] Configure CloudAMQP exchange, queue, and environment variables
+## Current state
 
-**Objective:** extend both services' validated configuration to know about the four RabbitMQ/
-CloudAMQP settings Project 7 needs (`CLOUDAMQP_URL`, `RABBITMQ_EXCHANGE`, `RABBITMQ_QUEUE`,
-`RABBITMQ_ROUTING_PREFIX`) — configuration only, so every later Project 7 issue (publisher,
-consumer, endpoint refactor) has real, validated config to build against.
+- **Branch:** `feature/71-command-publisher`
+- **Issue:** #71 — `[RabbitMQ] Add Node.js CommandPublisher port and outbound adapter` — implemented
+  this session, not yet committed
+- **Project / Phase:** Project 7 — First Queued Firewall Rule (tracking epic #69), child issue 2 of 7
 
-**AI collaboration on this issue:** Claude Code performed the entire investigation and
-implementation below in this session, directed by an explicit, itemized specification from the
-repository owner (exact schema fields, exact `config.rabbitmq` shape, exact `.env.example`
-placeholder values, exact test coverage expectations). No separate ChatGPT conversation content
-was provided or is implied for this issue.
+## What was already completed before this branch
 
-**Scope check performed before writing:** the issue explicitly excludes CloudAMQP resource
-creation, `amqplib`/`aio-pika` installation, publisher/consumer code, `operation_id`, and any
-change to `POST /api/firewall/ips` — all confirmed out of scope and not touched. Nothing was
-committed, pushed, or staged; real `.env`/`.env.dev`/`.env.prod`/`python-rule-service/.env` files
-were not created, read, or modified.
+- Project 6 (#54, #55–#61): the Python service foundation. Out of scope for this branch.
+- **Issue #70 — complete and closed.** RabbitMQ/CloudAMQP configuration (env schemas on both
+  services) merged via PR #77; real infrastructure prerequisites (CloudAMQP exchange
+  `firewall.commands`, durable queue `romi.firewall.commands`, binding `romi.rule.create`, real
+  gitignored `.env` values on both services) independently verified earlier this session via each
+  service's own config loader and a read-only CloudAMQP Management API check — no credentials
+  were ever printed. Both full test suites were green at that point (Node 188/17 skipped, Python
+  71/5 skipped).
 
-**Config changes:**
-- `src/main/env.ts` — added the four variables to the zod schema (`z.string().min(1)`, matching
-  the existing `DB_HOST`-style pattern) and a new frozen `config.rabbitmq` section
-  (`{ url, exchange, queue, routingPrefix }`).
-- `python-rule-service/src/main/config.py` — added the same four fields to `Settings` as `str`,
-  plus one shared `@field_validator` covering blank-value rejection for all four, styled after the
-  existing `_database_uri_not_blank` validator. `DATABASE_URI`/`LOG_LEVEL` validation untouched.
+## What this branch was intended to implement (Issue #71 scope)
 
-**Example env files:**
-- `.env.example` and `python-rule-service/.env.example` — added the four variables with
-  placeholder-only values, under a one-line comment noting real credentials must never be
-  committed.
+- `amqplib` installed in the Node service.
+- A `CommandPublisher` application port hiding `amqplib` from application/domain code.
+- A `RabbitMqCommandPublisher` outbound adapter: persistent connection + reused confirm channel,
+  publish-with-confirmation.
+- A 503-mapped application error for publish/connection failure.
+- `main/` wiring so the adapter is constructed once at startup, not per-request.
+- Graceful shutdown alongside the existing PostgreSQL shutdown.
+- Unit tests against mocked `amqplib`, no live CloudAMQP required.
 
-**Documentation:**
-- `README.md` and `python-rule-service/README.md` — added the four variables to each existing
-  environment-variable table, plus one line naming CloudAMQP as the RabbitMQ host with no local
-  RabbitMQ install/container in this project's setup. No larger rewrite.
+## What was actually implemented in this branch
 
-**Tests added/updated** — every existing call site that constructs either config object needed the
-four new keys or it would fail with "missing required variable," since both are required-by-default
-now:
-- `tests/unit/main/env.test.ts` — extended the shared `ENV_KEYS`/`VALID_ENV` fixture; added tests
-  for valid RabbitMQ config resolving into `config.rabbitmq`, missing/blank cases for each of the
-  four variables, `config.rabbitmq` frozen, and updated the config key-shape test.
-- `tests/unit/main/Logger.test.ts`, `tests/unit/main/startServer.test.ts`,
-  `tests/unit/adapters/outbound/persistence/postgres/connection.test.ts` — each duplicates its own
-  local `ENV_KEYS`/`VALID_ENV` fixture (pre-existing repo pattern) to build a real `config` for
-  testing `Logger`/`startServer`/`PostgresConnection`; all three needed the four new keys added to
-  keep passing.
-- `python-rule-service/tests/unit/main/test_config.py` — extended `ENV_KEYS`/`VALID_ENV` (the
-  existing parametrized missing-variable test automatically now covers all four new vars too);
-  added a blank-value test for each of the four; extended the valid-config test to assert the new
-  fields load; fixed `test_production_env_accepts_a_production_database`, which built its override
-  dict from scratch without the new keys and would otherwise have started failing for reasons
-  unrelated to what it actually tests.
-- `python-rule-service/tests/conftest.py` — added `setdefault()` calls for the four new vars,
-  alongside the existing `ENV`/`DATABASE_URI`/`LOG_LEVEL` ones; this file's whole purpose is
-  letting the entire suite import `src.main.config`'s module-level `settings` singleton without a
-  real `.env`, so this was necessary for the full suite to keep collecting, not just the new tests.
+All of the above, and nothing beyond it.
 
-**Files changed:**
-- `src/main/env.ts`
-- `tests/unit/main/env.test.ts`, `tests/unit/main/Logger.test.ts`,
-  `tests/unit/main/startServer.test.ts`,
-  `tests/unit/adapters/outbound/persistence/postgres/connection.test.ts`
-- `.env.example`
-- `README.md`
-- `python-rule-service/src/main/config.py`
-- `python-rule-service/tests/unit/main/test_config.py`
-- `python-rule-service/tests/conftest.py`
-- `python-rule-service/.env.example`
-- `python-rule-service/README.md`
-- `AI_CONVERSATION_REPORT.md` — this file.
+**New files:**
+- `src/application/ports/CommandPublisher.ts` — `CommandPublisher` interface (`publish(command):
+  Promise<void>`) plus the `CreateRulesCommand`/`CreateRulesPayload` types for Exercise 7's exact
+  contract (`operation_id`, `command_type: "create_rules"`, `payload: { type, mode, values }`,
+  reusing the existing `RuleType`/`RuleMode`/`RuleValue` domain types — no new fields added beyond
+  what the exercise specifies).
+- `src/adapters/outbound/rabbitmq/RabbitMqCommandPublisher.ts` — the concrete adapter. Owns its own
+  connection/confirm-channel lifecycle (`connect()`, `publish()`, `close()`), takes
+  `{ url, exchange, routingPrefix }` via constructor injection (mirroring how
+  `DrizzleRuleRepository` receives its dependency rather than importing config globally).
+- `tests/unit/adapters/outbound/rabbitmq/RabbitMqCommandPublisher.test.ts` — 14 tests against a
+  mocked `amqplib` (same `vi.mock`/`vi.hoisted` pattern as `connection.test.ts`'s `pg` mock).
 
-**No CloudAMQP resource, no `amqplib`/`aio-pika` dependency, and no publisher/consumer/endpoint
-code was added.** This is a pure config-and-tests change.
+**Modified files:**
+- `src/application/errors/AppError.ts` — added `ServiceUnavailableError extends AppError` (503),
+  sibling to the existing `ValidationError`/`NotFoundError`, no changes to either of those.
+- `src/main/startServer.ts` — constructs `RabbitMqCommandPublisher` from `config.rabbitmq` right
+  after the Postgres connection is established, calls `.connect()` before `createApp`/`listen`
+  (so a broker-connection failure fails startup exactly like a Postgres failure does), and closes
+  it in the existing `shutdown()` `finally` block alongside `postgresConnection.shutdown()`. The
+  publisher is **not** threaded into `createApp`/the router — nothing consumes it yet, since no
+  route needs it until Issue #72.
+- `tests/unit/main/startServer.test.ts` — extended the existing fakes/mocks with a
+  `FakeRabbitMqCommandPublisher`, added 2 new tests (constructs from `config.rabbitmq`; publisher
+  connect-failure blocks startup the same way a DB failure does) and extended 5 existing
+  lifecycle/shutdown tests to also assert the publisher's connect/close calls.
+- `package.json` / `package-lock.json` — added `amqplib` (no `@types/amqplib` needed; the package
+  ships its own `index.d.ts`). No other dependency changed.
 
-**Verification performed:**
+**Explicitly not touched:** `src/adapters/inbound/http/app.ts`,
+`src/adapters/inbound/http/controllers/firewallController.ts` — confirmed via
+`git diff --stat` showing zero changes to either file.
+
+## Tests run and their results
+
 ```
-npm run lint                       → passed
-npm test                           → 188 passed, 17 skipped, 0 failed
-                                      (one Logger.test.ts Singleton test timed out on the first
-                                      full-suite run — a pre-existing cold-import CPU-contention
-                                      flake already documented in vitest.config.mts's own comments,
-                                      not a regression; passed in isolation and on immediate re-run)
-python -m pytest -q (python-rule-service, via .venv)
-                                    → 71 passed, 5 skipped
+npm run lint   → passed (tsc --noEmit, no errors)
+npm test       → 204 passed, 17 skipped, 0 failed  (was 188 passed/17 skipped before this branch;
+                  +16 new tests, 0 regressions)
 ```
-Skipped tests in both suites are the guarded real-PostgreSQL integration tests
-(`DrizzleRuleRepository.test.ts`, `test_sqlalchemy_rule_repository.py`,
-`test_add_ip_end_to_end.py`), which skip cleanly with no `TEST_DB_*`/`TEST_DATABASE_URI`
-configured — unrelated to this change, pre-existing behavior.
 
-**Limitations / remaining gaps, stated plainly, not left implicit:**
-- `.env.dev.example`/`.env.prod.example` (the Docker Compose templates) were intentionally left
-  untouched per the issue's exact file scope, but `env.ts` now requires the four RabbitMQ variables
-  unconditionally — `npm run dev:docker` and the production Docker image will fail fast at startup
-  until those two templates (and the real `.env.dev`/`.env.prod`) also carry the four new keys.
-  Flagged for a follow-up, not fixed here.
-- `src/main/migrate.ts` also imports `config` from `./env`, so `npm run db:migrate`/`db:migrate:dev`
-  now also require the RabbitMQ variables to be set, even though migrations have nothing to do with
-  RabbitMQ — an inherent consequence of the fields being required-by-default, not something fixable
-  within this issue's scope.
-- `python-rule-service/.env.local-backup` exists as a stray untracked file; not opened this
-  session. Confirmed correctly gitignored (caught by the root `.gitignore`'s `.env.*` rule via
-  `git check-ignore`), so no leak risk, but worth deleting once no longer needed.
-- CloudAMQP resources (exchange, queue, binding) are not yet created — real values for the four
-  variables will be added to the real, gitignored `.env`/`python-rule-service/.env` files manually,
-  outside this session, once that provisioning happens.
+New test coverage, per Issue #71's own checklist: connection/channel created once; a second
+`connect()` reuses the channel; concurrent `connect()` calls share one in-flight attempt;
+`publish()` reuses the channel across multiple calls without reconnecting; the configured exchange
+and a routing key built from `routingPrefix` (`"<prefix>.rule.create"`) are used; the exact command
+is serialized as the JSON body; the broker's confirm callback is awaited before `publish()`
+resolves; a broker error/nack and a publish-before-connect both surface `ServiceUnavailableError`
+(503) with distinct codes; `close()` closes both the channel and the connection, is idempotent, and
+is safe when never connected; a raw `connect()` failure propagates unwrapped (so startup fails the
+same way Postgres's does, not swallowed as a 503). Python's suite was not touched this branch (no
+Python file changed).
 
-Nothing was staged, committed, pushed, or changed on GitHub for this work.
+## Known limitations / remaining work
+
+- The publisher is constructed and connected at startup but not yet consumed by any route —
+  intentional, since wiring it into `POST /api/firewall/ips` is Issue #72's job.
+- No retry/backoff on the RabbitMQ `connect()` call (unlike Postgres's Exponential Backoff) — not
+  requested by Issue #71's scope; a single failed attempt fails startup immediately.
+- `assertExchange`/`assertQueue` are deliberately not called by the adapter — the exchange/queue
+  are already verified to exist from Issue #70, and asserting them again would edge toward
+  resource-creation code this issue explicitly excluded.
+
+## Explicit note of what was NOT implemented
+
+Per Issue #71's strict scope: `POST /api/firewall/ips` is unchanged; no `operation_id` is generated
+in the HTTP flow; no `202 Accepted` behavior exists; the publisher is not wired into any route or
+use case; no Python consumer or `aio-pika` work exists; no ACK/NACK logic exists (that's the
+Python-consumer side, a later issue); no end-to-end flow has run. **Issue #72 has not started.**
+
+Nothing was staged, committed, or pushed this session.
