@@ -1,3 +1,4 @@
+import structlog
 from structlog.testing import capture_logs
 
 from src.main.config import settings
@@ -23,6 +24,27 @@ class TestStructuredOutput:
         assert event["event"] == "rule_added"
         assert event["rule_type"] == "ip"
         assert event["mode"] == "blacklist"
+
+
+class TestContextvarsBinding:
+    def test_bound_contextvar_is_merged_into_a_log_call(self) -> None:
+        structlog.contextvars.bind_contextvars(operation_id="11111111-1111-1111-1111-111111111111")
+        try:
+            with capture_logs(processors=[structlog.contextvars.merge_contextvars]) as captured:
+                logger.info("event_during_bound_context")
+        finally:
+            structlog.contextvars.clear_contextvars()
+
+        assert captured[0]["operation_id"] == "11111111-1111-1111-1111-111111111111"
+
+    def test_unbinding_removes_the_context_from_later_log_calls(self) -> None:
+        structlog.contextvars.bind_contextvars(operation_id="11111111-1111-1111-1111-111111111111")
+        structlog.contextvars.unbind_contextvars("operation_id")
+
+        with capture_logs() as captured:
+            logger.info("event_after_unbind")
+
+        assert "operation_id" not in captured[0]
 
 
 class TestConfiguredLevelBehavior:
