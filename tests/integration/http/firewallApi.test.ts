@@ -3,28 +3,64 @@ import request from "supertest";
 import { Express } from "express";
 import { createApp } from "../../../src/adapters/inbound/http/app";
 import { InMemoryRuleRepository } from "../../../src/adapters/outbound/persistence/memory/InMemoryRuleRepository";
+import { CommandPublisher, CreateRulesCommand } from "../../../src/application/ports/CommandPublisher";
+import { ServiceUnavailableError } from "../../../src/application/errors/AppError";
+
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+interface FakeCommandPublisherState {
+  publishedCommands: CreateRulesCommand[];
+  shouldFail: boolean;
+}
+
+function createFakeCommandPublisher(state: FakeCommandPublisherState): CommandPublisher {
+  return {
+    async publish(command) {
+      if (state.shouldFail) {
+        throw new ServiceUnavailableError("RABBITMQ_PUBLISH_FAILED", "Failed to publish command to RabbitMQ.");
+      }
+      state.publishedCommands.push(command);
+    },
+  };
+}
 
 describe("Firewall HTTP API", () => {
   let repository: InMemoryRuleRepository;
   let app: Express;
+  let publisherState: FakeCommandPublisherState;
 
   beforeEach(() => {
     repository = new InMemoryRuleRepository();
-    app = createApp(repository);
+    publisherState = { publishedCommands: [], shouldFail: false };
+    app = createApp(repository, createFakeCommandPublisher(publisherState));
   });
 
   describe("success paths", () => {
-    it("POST /api/firewall/ips returns 201 and the created ip rule", async () => {
+    it("POST /api/firewall/ips returns 202 with an operation_id, and no repository row", async () => {
       const response = await request(app)
         .post("/api/firewall/ips")
         .send({ values: ["1.2.3.4"], mode: "blacklist" });
 
-      expect(response.status).toBe(201);
-      expect(response.body).toEqual({
-        type: "ip",
-        mode: "blacklist",
-        status: "success",
-        values: [{ id: expect.any(Number), value: "1.2.3.4", active: true }],
+      expect(response.status).toBe(202);
+      expect(response.body).toEqual({ operation_id: expect.any(String) });
+      expect(response.body.operation_id).toMatch(UUID_REGEX);
+
+      // Issue #72's whole point: Node no longer writes directly to PostgreSQL
+      // for this route. Confirms nothing landed in the repository as a side effect.
+      const getResponse = await request(app).get("/api/firewall/rules").query({ type: "ip" });
+      expect(getResponse.body.ips.blacklist).toEqual([]);
+    });
+
+    it("POST /api/firewall/ips publishes the exact create_rules command, confirmed by the broker", async () => {
+      const response = await request(app)
+        .post("/api/firewall/ips")
+        .send({ values: ["1.2.3.4"], mode: "blacklist" });
+
+      expect(publisherState.publishedCommands).toHaveLength(1);
+      expect(publisherState.publishedCommands[0]).toEqual({
+        operation_id: response.body.operation_id,
+        command_type: "create_rules",
+        payload: { type: "ip", mode: "blacklist", values: ["1.2.3.4"] },
       });
     });
 
@@ -57,8 +93,10 @@ describe("Firewall HTTP API", () => {
     });
 
     it("GET /api/firewall/rules returns 200 with all rules grouped by type and mode", async () => {
-      await request(app).post("/api/firewall/ips").send({ values: ["1.2.3.4"], mode: "blacklist" });
-      await request(app).post("/api/firewall/ips").send({ values: ["5.6.7.8"], mode: "whitelist" });
+      // ip rows are seeded directly through the repository, not via POST /ips,
+      // since that route no longer writes synchronously (Issue #72).
+      await repository.add([{ type: "ip", mode: "blacklist", value: "1.2.3.4" }]);
+      await repository.add([{ type: "ip", mode: "whitelist", value: "5.6.7.8" }]);
       await request(app)
         .post("/api/firewall/domains")
         .send({ values: ["example.com"], mode: "blacklist" });
@@ -92,7 +130,7 @@ describe("Firewall HTTP API", () => {
     });
 
     it("GET /api/firewall/rules?type=ip returns 200 with only the ips top-level key", async () => {
-      await request(app).post("/api/firewall/ips").send({ values: ["1.2.3.4"], mode: "blacklist" });
+      await repository.add([{ type: "ip", mode: "blacklist", value: "1.2.3.4" }]);
       await request(app)
         .post("/api/firewall/domains")
         .send({ values: ["example.com"], mode: "blacklist" });
@@ -113,16 +151,13 @@ describe("Firewall HTTP API", () => {
     });
 
     it("DELETE /api/firewall/rules removes the rule and a follow-up GET confirms deletion", async () => {
-      const created = await request(app)
-        .post("/api/firewall/ips")
-        .send({ values: ["1.2.3.4"], mode: "blacklist" });
-      const id = created.body.values[0].id;
+      const [created] = await repository.add([{ type: "ip", mode: "blacklist", value: "1.2.3.4" }]);
 
-      const deleteResponse = await request(app).delete("/api/firewall/rules").send({ ids: [id] });
+      const deleteResponse = await request(app).delete("/api/firewall/rules").send({ ids: [created.id] });
 
       expect(deleteResponse.status).toBe(200);
       expect(deleteResponse.body).toEqual({
-        removed: [{ id, type: "ip", mode: "blacklist", value: "1.2.3.4", active: true }],
+        removed: [{ id: created.id, type: "ip", mode: "blacklist", value: "1.2.3.4", active: true }],
         status: "success",
       });
 
@@ -131,18 +166,15 @@ describe("Firewall HTTP API", () => {
     });
 
     it("PATCH /api/firewall/rules/status updates active and a follow-up GET confirms persistence", async () => {
-      const created = await request(app)
-        .post("/api/firewall/ips")
-        .send({ values: ["1.2.3.4"], mode: "blacklist" });
-      const id = created.body.values[0].id;
+      const [created] = await repository.add([{ type: "ip", mode: "blacklist", value: "1.2.3.4" }]);
 
       const patchResponse = await request(app)
         .patch("/api/firewall/rules/status")
-        .send({ ids: [id], active: false });
+        .send({ ids: [created.id], active: false });
 
       expect(patchResponse.status).toBe(200);
       expect(patchResponse.body).toEqual({
-        updated: [{ id, type: "ip", mode: "blacklist", value: "1.2.3.4", active: false }],
+        updated: [{ id: created.id, type: "ip", mode: "blacklist", value: "1.2.3.4", active: false }],
         status: "success",
       });
 
@@ -151,17 +183,21 @@ describe("Firewall HTTP API", () => {
     });
 
     it("a rule created by one request is visible to a later request on the same app/repository instance", async () => {
-      await request(app).post("/api/firewall/ips").send({ values: ["1.2.3.4"], mode: "blacklist" });
+      // Uses /domains (still synchronous) to prove the app/repository is a
+      // shared instance across requests within a test, not freshly built each
+      // time — /ips can no longer demonstrate this since it doesn't write
+      // synchronously any more (Issue #72).
+      await request(app).post("/api/firewall/domains").send({ values: ["example.com"], mode: "blacklist" });
 
       const getResponse = await request(app).get("/api/firewall/rules");
 
-      expect(getResponse.body.ips.blacklist).toHaveLength(1);
-      expect(getResponse.body.ips.blacklist[0].value).toBe("1.2.3.4");
+      expect(getResponse.body.domains.blacklist).toHaveLength(1);
+      expect(getResponse.body.domains.blacklist[0].value).toBe("example.com");
     });
   });
 
   describe("representative error paths", () => {
-    it("POST /api/firewall/ips with an invalid IP returns 400 INVALID_IP", async () => {
+    it("POST /api/firewall/ips with an invalid IP returns 400 INVALID_IP and does not publish", async () => {
       const response = await request(app)
         .post("/api/firewall/ips")
         .send({ values: ["999.999.999.999"], mode: "blacklist" });
@@ -172,6 +208,53 @@ describe("Firewall HTTP API", () => {
         code: "INVALID_IP",
         message: expect.any(String),
       });
+      expect(publisherState.publishedCommands).toHaveLength(0);
+    });
+
+    it("POST /api/firewall/ips with an empty values array returns 400 INVALID_VALUES and does not publish", async () => {
+      const response = await request(app)
+        .post("/api/firewall/ips")
+        .send({ values: [], mode: "blacklist" });
+
+      expect(response.status).toBe(400);
+      expect(response.body).toEqual({
+        status: "error",
+        code: "INVALID_VALUES",
+        message: expect.any(String),
+      });
+      expect(publisherState.publishedCommands).toHaveLength(0);
+    });
+
+    it("POST /api/firewall/ips with an invalid mode returns 400 INVALID_MODE and does not publish", async () => {
+      const response = await request(app)
+        .post("/api/firewall/ips")
+        .send({ values: ["1.2.3.4"], mode: "allow" });
+
+      expect(response.status).toBe(400);
+      expect(response.body).toEqual({
+        status: "error",
+        code: "INVALID_MODE",
+        message: expect.any(String),
+      });
+      expect(publisherState.publishedCommands).toHaveLength(0);
+    });
+
+    it("POST /api/firewall/ips returns 503 when the publisher fails, and no repository row is written", async () => {
+      publisherState.shouldFail = true;
+
+      const response = await request(app)
+        .post("/api/firewall/ips")
+        .send({ values: ["1.2.3.4"], mode: "blacklist" });
+
+      expect(response.status).toBe(503);
+      expect(response.body).toEqual({
+        status: "error",
+        code: "RABBITMQ_PUBLISH_FAILED",
+        message: expect.any(String),
+      });
+
+      const getResponse = await request(app).get("/api/firewall/rules").query({ type: "ip" });
+      expect(getResponse.body.ips.blacklist).toEqual([]);
     });
 
     it("POST /api/firewall/domains with an invalid domain returns 400 INVALID_DOMAIN", async () => {
@@ -196,32 +279,6 @@ describe("Firewall HTTP API", () => {
       expect(response.body).toEqual({
         status: "error",
         code: "INVALID_PORT",
-        message: expect.any(String),
-      });
-    });
-
-    it("POST /api/firewall/ips with an empty values array returns 400 INVALID_VALUES", async () => {
-      const response = await request(app)
-        .post("/api/firewall/ips")
-        .send({ values: [], mode: "blacklist" });
-
-      expect(response.status).toBe(400);
-      expect(response.body).toEqual({
-        status: "error",
-        code: "INVALID_VALUES",
-        message: expect.any(String),
-      });
-    });
-
-    it("POST /api/firewall/ips with an invalid mode returns 400 INVALID_MODE", async () => {
-      const response = await request(app)
-        .post("/api/firewall/ips")
-        .send({ values: ["1.2.3.4"], mode: "allow" });
-
-      expect(response.status).toBe(400);
-      expect(response.body).toEqual({
-        status: "error",
-        code: "INVALID_MODE",
         message: expect.any(String),
       });
     });
@@ -262,14 +319,11 @@ describe("Firewall HTTP API", () => {
     });
 
     it("DELETE with one existing and one missing ID returns 404 and does not partially delete", async () => {
-      const created = await request(app)
-        .post("/api/firewall/ips")
-        .send({ values: ["1.2.3.4"], mode: "blacklist" });
-      const id = created.body.values[0].id;
+      const [created] = await repository.add([{ type: "ip", mode: "blacklist", value: "1.2.3.4" }]);
 
       const deleteResponse = await request(app)
         .delete("/api/firewall/rules")
-        .send({ ids: [id, 9999] });
+        .send({ ids: [created.id, 9999] });
 
       expect(deleteResponse.status).toBe(404);
       expect(deleteResponse.body).toEqual({
@@ -280,19 +334,16 @@ describe("Firewall HTTP API", () => {
 
       const getResponse = await request(app).get("/api/firewall/rules");
       expect(getResponse.body.ips.blacklist).toEqual([
-        { id, type: "ip", mode: "blacklist", value: "1.2.3.4", active: true },
+        { id: created.id, type: "ip", mode: "blacklist", value: "1.2.3.4", active: true },
       ]);
     });
 
     it("PATCH with one existing and one missing ID returns 404 and does not partially update", async () => {
-      const created = await request(app)
-        .post("/api/firewall/ips")
-        .send({ values: ["1.2.3.4"], mode: "blacklist" });
-      const id = created.body.values[0].id;
+      const [created] = await repository.add([{ type: "ip", mode: "blacklist", value: "1.2.3.4" }]);
 
       const patchResponse = await request(app)
         .patch("/api/firewall/rules/status")
-        .send({ ids: [id, 9999], active: false });
+        .send({ ids: [created.id, 9999], active: false });
 
       expect(patchResponse.status).toBe(404);
       expect(patchResponse.body).toEqual({
