@@ -23,7 +23,7 @@ export async function startServer(): Promise<StartedServer> {
   });
   await commandPublisher.connect();
 
-  const app = createApp(repository);
+  const app = createApp(repository, commandPublisher);
 
   const httpServer = app.listen(config.port, () => {
     logger.info(`Firewall orchestrator API listening on port ${config.port}`);

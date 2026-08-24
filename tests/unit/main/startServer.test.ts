@@ -50,6 +50,7 @@ const fakes = vi.hoisted(() => {
     fakeDb: { marker: string };
     lastRepositoryDb: unknown;
     lastCreateAppRepository: unknown;
+    lastCreateAppPublisher: unknown;
     closeImpl: (cb: (err?: Error) => void) => void;
     closeCalls: number;
     publisherConnectImpl: () => Promise<void>;
@@ -64,6 +65,7 @@ const fakes = vi.hoisted(() => {
     fakeDb: { marker: "fake-db" },
     lastRepositoryDb: undefined,
     lastCreateAppRepository: undefined,
+    lastCreateAppPublisher: undefined,
     closeImpl: (cb) => cb(),
     closeCalls: 0,
     publisherConnectImpl: async () => undefined,
@@ -111,9 +113,10 @@ const fakes = vi.hoisted(() => {
     }),
   };
 
-  const createApp = vi.fn((repository: unknown) => {
+  const createApp = vi.fn((repository: unknown, commandPublisher: unknown) => {
     state.callOrder.push("createApp");
     state.lastCreateAppRepository = repository;
+    state.lastCreateAppPublisher = commandPublisher;
     return {
       listen: vi.fn((_port: number, cb: () => void) => {
         state.callOrder.push("listen");
@@ -154,6 +157,7 @@ describe("startServer", () => {
     fakes.state.closeCalls = 0;
     fakes.state.lastRepositoryDb = undefined;
     fakes.state.lastCreateAppRepository = undefined;
+    fakes.state.lastCreateAppPublisher = undefined;
     fakes.state.closeImpl = (cb) => cb();
     fakes.state.connectImpl = async () => fakes.state.fakeDb;
     fakes.state.publisherConnectImpl = async () => undefined;
@@ -208,6 +212,15 @@ describe("startServer", () => {
       exchange: "firewall.commands",
       routingPrefix: "romi",
     });
+  });
+
+  it("passes the connected commandPublisher into createApp alongside the repository", async () => {
+    const { startServer } = await loadStartServer();
+
+    const result = await startServer();
+    registeredForCleanup.push(result);
+
+    expect(fakes.state.lastCreateAppPublisher).toBeInstanceOf(fakes.FakeRabbitMqCommandPublisher);
   });
 
   it("does not call createApp or listen when the database connection fails", async () => {

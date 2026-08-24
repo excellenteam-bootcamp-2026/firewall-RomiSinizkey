@@ -1,22 +1,25 @@
 import { NextFunction, Request, Response, Router } from "express";
 import { RuleRepository } from "../../../../application/ports/RuleRepository";
+import { CommandPublisher } from "../../../../application/ports/CommandPublisher";
 import { AddRulesUseCase } from "../../../../application/use-cases/AddRulesUseCase";
 import { RemoveRulesUseCase } from "../../../../application/use-cases/RemoveRulesUseCase";
 import { GetRulesUseCase } from "../../../../application/use-cases/GetRulesUseCase";
 import { UpdateRuleStatusUseCase } from "../../../../application/use-cases/UpdateRuleStatusUseCase";
+import { PublishCreateRulesCommandUseCase } from "../../../../application/use-cases/PublishCreateRulesCommandUseCase";
 
-export function createFirewallRouter(repository: RuleRepository): Router {
+export function createFirewallRouter(repository: RuleRepository, commandPublisher: CommandPublisher): Router {
   const router = Router();
 
   const addRules = new AddRulesUseCase(repository);
   const removeRules = new RemoveRulesUseCase(repository);
   const getRules = new GetRulesUseCase(repository);
   const updateRuleStatus = new UpdateRuleStatusUseCase(repository);
+  const publishCreateRulesCommand = new PublishCreateRulesCommandUseCase(commandPublisher);
 
   router.post("/ips", async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const result = await addRules.execute("ip", req.body?.values, req.body?.mode);
-      res.status(201).json(result);
+      const result = await publishCreateRulesCommand.execute(req.body?.values, req.body?.mode);
+      res.status(202).json(result);
     } catch (err) {
       next(err);
     }
