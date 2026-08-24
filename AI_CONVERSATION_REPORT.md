@@ -1,4 +1,4 @@
-# AI Conversation Report — Issue #72
+# AI Conversation Report — Issue #73
 
 ## Purpose
 
@@ -9,111 +9,107 @@ below.
 
 ## Current state
 
-- **Branch:** `feature/72-async-ip-publish`
-- **Issue:** #72 — `[API] Refactor POST /api/firewall/ips to async publish flow` — implemented this
+- **Branch:** `feature/73-python-rabbitmq-consumer`
+- **Issue:** #73 — `[Python] Add RabbitMQ consumer and message contract` — implemented this
   session, not yet committed
-- **Project / Phase:** Project 7 — First Queued Firewall Rule (tracking epic #69), child issue 3 of 7
-- **Base commit:** `da40600` — merge of PR #78 (`feature/71-command-publisher`), confirmed identical
+- **Project / Phase:** Project 7 — First Queued Firewall Rule (tracking epic #69), child issue 4 of 7
+- **Base commit:** `b60ef2a` — merge of PR #79 (`feature/72-async-ip-publish`), confirmed identical
   to `main` and `origin/main` at branch start (no drift, no stacked/unmerged work underneath)
 
 ## What was already completed before this branch
 
-- **Issue #70 — complete and closed.** RabbitMQ/CloudAMQP configuration and verified real
+- **Issue #70 — complete and closed.** RabbitMQ/CloudAMQP configuration, verified real
   infrastructure (exchange, queue, binding, gitignored env values on both services).
-- **Issue #71 — complete, merged via PR #78.** `CommandPublisher` port, `RabbitMqCommandPublisher`
-  adapter (connect/publish-with-confirm/close), `ServiceUnavailableError` (503), and `main/`
-  wiring that constructs and connects the publisher at startup — but, as of the start of this
-  branch, never passed it anywhere: `commandPublisher` was a local variable in `startServer.ts`
-  that `createApp(repository)` never received, so nothing in the HTTP request path could reach it.
+- **Issue #71 — complete, merged via PR #78.** Node `CommandPublisher` port + `RabbitMqCommandPublisher`
+  adapter, `ServiceUnavailableError`.
+- **Issue #72 — complete, merged via PR #79.** `POST /api/firewall/ips` now validates, generates
+  `operation_id`, and publishes a `create_rules` command through the connected publisher, returning
+  `202 Accepted`. This is the producer side of the full flow — the command lands in the real
+  `romi.firewall.commands` queue, currently with no consumer reading it.
 
-## What this branch was intended to implement (Issue #72 scope)
+## What this branch was intended to implement (Issue #73 scope)
 
-Change only `POST /api/firewall/ips` from synchronous `AddRulesUseCase` → `DrizzleRuleRepository` →
-`201 Created` to validate → generate `operation_id` → `CommandPublisher.publish(...)` →
-`202 Accepted` + `operation_id`. All other routes (`/domains`, `/ports`, `DELETE`, `GET`, `PATCH`)
-stay on the existing repository/use-case flow, unchanged.
+The Python-side inbound half of the queue boundary: an `aio-pika` consumer that reads from
+`romi.firewall.commands`, parses JSON, and validates it against a Pydantic contract matching
+exactly what Node publishes — stopping there. Not calling `AddIpUseCase`, not touching PostgreSQL,
+not implementing the final ack-after-DB-success semantics — those are Issue #74.
 
 ## What was actually implemented in this branch
 
 All of the above, and nothing beyond it.
 
 **New files:**
-- `src/application/use-cases/PublishCreateRulesCommandUseCase.ts` — a new use case, sibling to
-  `AddRulesUseCase` etc., depending on `CommandPublisher` instead of `RuleRepository`. Validates
-  mode/non-empty-array/IPv4 (reusing `assertValidMode`/`assertNonEmptyArray`/`assertValidIps` from
-  the existing `ruleValidation.ts` — no new validation logic written), then — only after validation
-  succeeds — generates `operation_id` via Node's built-in `crypto.randomUUID()`, builds the exact
-  `{ operation_id, command_type: "create_rules", payload: { type: "ip", mode, values } }` shape
-  from `CommandPublisher.ts`'s existing types, calls `commandPublisher.publish(command)`, and
-  returns `{ operation_id }`.
-- `tests/unit/application/use-cases/PublishCreateRulesCommandUseCase.test.ts` — 10 tests, same
-  `createMockRepository()`-style convention as `AddRulesUseCase.test.ts`.
+- `python-rule-service/src/adapters/inbound/__init__.py`,
+  `python-rule-service/src/adapters/inbound/rabbitmq/__init__.py` — new `inbound/` package,
+  sibling to the existing `adapters/outbound/`, mirroring Node's `adapters/inbound/http` /
+  `adapters/outbound/persistence` split.
+- `python-rule-service/src/adapters/inbound/rabbitmq/message_models.py` — `CreateRulesPayload` and
+  `CreateRulesCommand` Pydantic models (both `frozen=True`, matching the project's general
+  immutable-value-object preference). `command_type`/`payload.type`/`payload.mode` are `Literal`
+  types, so Pydantic natively rejects any other value with no custom validator code needed.
+  Custom validators added only for what `Literal` can't express: `operation_id` must parse as a
+  UUID, and `payload.values` must be a non-empty list where every entry parses as `IPv4Address`.
+- `python-rule-service/src/adapters/inbound/rabbitmq/rabbitmq_consumer.py` —
+  `RabbitMqCommandConsumer`: `start()` connects via an injected `connect` function (defaults to
+  the real `aio_pika.connect_robust`), opens one channel, and does a **passive** `get_queue()`
+  check (`ensure=True`, aio-pika's default — confirmed by reading its source: this checks the
+  queue exists, it does not create one) against `RABBITMQ_QUEUE`, then registers a message
+  callback. Each message is JSON-parsed and validated against `CreateRulesCommand`; a message that
+  fails either step is `reject(requeue=False)`ed and never reaches the handler. A message that
+  passes validation is handed to an injected async `handler` (the seam Issue #74 will implement),
+  then acked. `stop()` closes the channel and connection, safe to call even if never started.
+- `python-rule-service/tests/unit/adapters/inbound/rabbitmq/test_message_models.py` — 16 tests.
+- `python-rule-service/tests/unit/adapters/inbound/rabbitmq/test_rabbitmq_consumer.py` — 14 tests,
+  using hand-written fake connection/channel/queue/message classes (matching this repo's existing
+  `FakeRuleRepository`-style convention, `tests/unit/conftest.py`) plus stdlib
+  `unittest.mock.AsyncMock` for the handler seam. No real network or CloudAMQP connection anywhere.
 
 **Modified files:**
-- `src/adapters/inbound/http/controllers/firewallController.ts` — `createFirewallRouter` now takes
-  a second parameter, `commandPublisher: CommandPublisher`, and constructs
-  `PublishCreateRulesCommandUseCase`. Only the `/ips` handler's body changed (calls the new use
-  case, responds `202`); `/domains`, `/ports`, `DELETE`, `GET`, `PATCH` are byte-for-byte unchanged.
-- `src/adapters/inbound/http/app.ts` — `createApp` now takes `commandPublisher` as a second
-  parameter (typed as the `CommandPublisher` port, not the concrete adapter) and threads it into
-  `createFirewallRouter`.
-- `src/main/startServer.ts` — one-line change: `createApp(repository)` → `createApp(repository,
-  commandPublisher)`. The publisher was already constructed and connected here since Issue #71;
-  this is what actually connects it to the HTTP path.
-- `tests/integration/http/firewallApi.test.ts` — added a fake `CommandPublisher` test double
-  (`createFakeCommandPublisher`, tracking published commands and able to simulate a broker
-  failure). Rewrote the `/ips` success/error tests for the new `202`/`operation_id`/`503`
-  contract. **Necessary side effect:** several *other* tests (`DELETE`, `PATCH`, two `GET`
-  variants) previously used `POST /api/firewall/ips` purely as a convenient way to synchronously
-  seed a queryable row — that stopped working the moment `/ips` stopped writing to the repository
-  directly. Those tests now seed via `repository.add(...)` directly (the `InMemoryRuleRepository`
-  instance the test already holds) instead of going through HTTP; their actual assertions
-  (DELETE/PATCH/GET behavior) are unchanged. One test ("a rule created by one request is visible
-  to a later request...") switched its fixture route from `/ips` to `/domains`, since its actual
-  point — proving the app/repository is a shared instance across requests within a test, not
-  rebuilt each time — no longer needs `/ips` specifically and `/domains` still demonstrates it
-  directly via HTTP.
-- `tests/integration/http/healthApi.test.ts` — `createApp` calls updated with a no-op
-  `CommandPublisher` fake to satisfy the new required parameter; behavior/assertions unchanged.
-- `tests/unit/main/startServer.test.ts` — extended the existing `createApp` fake to also capture
-  the second argument, plus one new test asserting `startServer()` passes the connected publisher
-  instance into `createApp`.
+- `python-rule-service/requirements.txt` — added `aio-pika` (the requested consumer client) and
+  `pytest-asyncio` (necessary to actually *run* `async def test_...` functions under plain
+  `pytest` — not requested explicitly, but required for the async tests Issue #73 itself asks for;
+  flagged here rather than added silently).
+- `python-rule-service/pytest.ini` — added `asyncio_mode = auto` so async test functions run
+  without needing `@pytest.mark.asyncio` on every one.
 
-**Explicitly not touched:** `src/application/use-cases/AddRulesUseCase.ts`,
-`src/adapters/outbound/persistence/postgres/DrizzleRuleRepository.ts`,
-`src/application/errors/AppError.ts`, `src/application/validation/ruleValidation.ts` — confirmed
-via `git diff --stat` showing zero changes to any of them. No Python file touched; `aio-pika` not
-installed; no consumer/ACK/NACK code written anywhere.
+**Explicitly not touched:** `python-rule-service/src/main/__main__.py` (no entrypoint wiring — the
+consumer is fully unit-testable via constructor-injected fakes without it),
+`src/application/use_cases/add_ip_use_case.py`, `src/adapters/outbound/persistence/postgres/
+sqlalchemy_rule_repository.py`, `src/main/config.py`/`db.py`/`logger.py`, and every Node.js file —
+confirmed via `git diff --stat` showing zero changes to any of them.
 
 ## Tests run and their results
 
 ```
-npm run lint   → passed (tsc --noEmit, no errors)
-npm test       → 217 passed, 17 skipped, 0 failed  (was 204 passed/17 skipped before this branch;
-                  +13 new tests, 0 regressions)
+python -m pytest tests/unit/adapters/inbound/rabbitmq/ -v
+  → 30 passed (16 message-model tests, 14 consumer tests)
+
+python -m pytest -q   (full suite)
+  → 101 passed, 5 skipped, 0 failed   (was 71 passed/5 skipped before this branch;
+                                        +30 new tests, 0 regressions)
 ```
 
-New/changed coverage, per Issue #72's own checklist: valid IP → `202` with an `operation_id`
-matching UUID shape; the fake publisher receives the exact `create_rules` command; invalid IP,
-invalid mode, and empty `values` each → `400` with zero publish attempts; publisher failure →
-`503` with `RABBITMQ_PUBLISH_FAILED`; a successful `POST /ips` is confirmed to leave no row in the
-repository (proving the write genuinely moved out of Node); `/domains`, `/ports`, `DELETE`, `GET`,
-`PATCH` all retain their previous `201`/`200`/`404` behavior unchanged. Python's suite was not
-touched this branch (no Python file changed).
+Skipped tests are the pre-existing, guarded real-Postgres integration tests (`TEST_DATABASE_URI`
+unset in this shell) — unrelated to this branch. Node's suite was not run this branch (no Node
+file changed).
 
 ## Known limitations / remaining work
 
-- `PublishCreateRulesCommandUseCase` is IP-only, matching Exercise 7's scoped slice — `/domains`
-  and `/ports` still go through the old synchronous path, unchanged, as instructed.
-- The response no longer returns DB-generated rule IDs for `/ips`, by design — the client only
-  gets `operation_id` back, since Node no longer knows the eventual database row.
+- The consumer's `handler` parameter has no real implementation yet — tests inject an `AsyncMock`
+  or a plain async no-op. Issue #74 will implement the real handler (calling `AddIpUseCase`
+  against `SqlAlchemyRuleRepository`).
+- Ack/reject only covers the validation boundary, as scoped: invalid messages are rejected without
+  requeue; valid messages are acked once the handler has been *called*, not once it has
+  *succeeded*. What happens if the handler itself raises is undefined by this issue and left to
+  Issue #74, which owns "ack only after the database write succeeds."
+- No entrypoint wires this consumer to a running process yet — `python -m src.main` still only
+  does what it did before (logs one `service_startup` event and exits). Issue #74 is expected to
+  build the long-lived async entry point.
 
 ## Explicit note of what was NOT implemented
 
-**No Python/consumer work has started.** No Python file was changed, `aio-pika` was not installed,
-no RabbitMQ consumer exists, no message-consumption logic was written, and no ACK/NACK behavior
-exists anywhere. The published command currently has no reader — CloudAMQP will show it landing in
-the `romi.firewall.commands` queue, unconsumed, until Issues #73/#74 build the Python side. No
-end-to-end flow has been run.
+`AddIpUseCase` is not called anywhere in this branch. No PostgreSQL write path exists. No
+ack-after-DB-success behavior exists. No Node → RabbitMQ → Python → PostgreSQL end-to-end flow has
+been run. No Node.js file was modified. **Issue #74 has not started.**
 
 Nothing was staged, committed, or pushed this session.
