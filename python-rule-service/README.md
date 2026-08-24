@@ -1,18 +1,14 @@
 # python-rule-service
 
-Independent Python service that will eventually become the sole writer of firewall
-configuration changes (Epic #54, `Project6-Dockerization-Plan.pdf`). Issue #55 stood
-up the environment and the hexagonal folder skeleton; Issue #56 added validated
-startup configuration; Issue #57 added structured logging and a reusable application
-error type; Issue #58 added the first business operation - Add IP - as a domain
-model, an application use case, and a repository port; Issue #59 added the concrete
-SQLAlchemy/PostgreSQL implementation of that port, reusing the existing
-`firewall_rules` table; Issue #60 consolidated the pytest suite and added an
-end-to-end integration test through the real database; Issue #61 (this one)
-documents the resulting architecture and traces one Add IP insertion from
-entry point to database - closing out Project 6's foundation phase. The
-existing Node.js API is unchanged and keeps serving all traffic; no schema,
-migration, HTTP, or Docker changes were made anywhere across #55-#61.
+Independent Python service that is now the sole writer of firewall configuration changes made
+through `POST /api/firewall/ips` (Epic #54; Project 7, Issues #70-#75). Project 6 (#55-#61) built
+and proved the Add IP write path - domain model, use case, repository port, and a SQLAlchemy/
+PostgreSQL implementation - entirely in isolation, through direct local calls only. Project 7
+connected it to real traffic: this service now runs as a long-lived process consuming commands
+Node publishes to CloudAMQP/RabbitMQ, validating them, and writing the resulting rows to the same
+`firewall_rules` table Node's `/domains` and `/ports` routes still write to directly. See "RabbitMQ
+consumer (Project 7)" below, and the root `README.md`'s "Project 7: asynchronous command flow" for
+the full two-service picture including Node's side.
 
 ## Structure
 
@@ -26,13 +22,17 @@ src/
     ports/rule_repository.py       RuleRepository (abstract, add() only) (#58)
     use_cases/add_ip_use_case.py   AddIpUseCase (#58)
   adapters/outbound/persistence/postgres/
-    schema.py                      firewall_rules Table mapping (this issue, #59)
-    sqlalchemy_rule_repository.py  SqlAlchemyRuleRepository (this issue, #59)
+    schema.py                      firewall_rules Table mapping (#59)
+    sqlalchemy_rule_repository.py  SqlAlchemyRuleRepository (#59)
+  adapters/inbound/rabbitmq/
+    message_models.py              CreateRulesCommand/CreateRulesPayload - Pydantic (#73)
+    rabbitmq_consumer.py           RabbitMqCommandConsumer - connects, consumes, ack/reject (#73, #74)
+    create_rules_command_handler.py  CreateRulesCommandHandler - command -> AddIpUseCase (#74)
   main/
-    config.py                      validated Pydantic settings (#56)
-    logger.py                      configured structlog logger (#57)
-    db.py                          SQLAlchemy Engine built from DATABASE_URI (this issue, #59)
-    __main__.py                    entry point - loads settings, logs a startup event
+    config.py                      validated Pydantic settings, incl. RabbitMQ vars (#56, #70)
+    logger.py                      configured structlog logger + contextvars merging (#57, #74)
+    db.py                          SQLAlchemy Engine built from DATABASE_URI (#59)
+    __main__.py                    entry point - wires and runs the long-lived consumer (#74)
 tests/
   unit/main/test_config.py                     config validation tests (#56)
   unit/main/test_logger.py                     structured output + level filtering (#57)
@@ -43,7 +43,10 @@ tests/
   unit/domain/test_errors.py                   InvalidIpError tests (#58)
   unit/application/ports/test_rule_repository.py    port contract tests (#58)
   unit/application/use_cases/test_add_ip_use_case.py  AddIpUseCase tests (#58)
-  unit/conftest.py                shared FakeRuleRepository fixture (this issue, #60)
+  unit/adapters/inbound/rabbitmq/test_message_models.py           contract validation (#73)
+  unit/adapters/inbound/rabbitmq/test_rabbitmq_consumer.py        consume/ack/reject behavior (#73, #74)
+  unit/adapters/inbound/rabbitmq/test_create_rules_command_handler.py  handler -> AddIpUseCase (#74)
+  unit/conftest.py                shared FakeRuleRepository fixture (#60)
   integration/
     db_test_helpers.py             TEST_DATABASE_URI + the "_test"-suffix safety guard (#59)
     test_db_test_helpers.py        pure guard-logic tests, no real database (#59)
@@ -232,10 +235,16 @@ the command line.
 python -m src.main
 ```
 
-Loads and validates settings first (#56); if that fails, the process stops
-before the logger is even configured. If configuration is valid, the logger is
-configured and the entry point emits one structured `service_startup` event
-with `env` and `configured_log_level` (never `DATABASE_URI`), then exits 0.
+Loads and validates settings first (#56); if that fails, the process stops before the logger is
+even configured. If configuration is valid, the logger is configured and the entry point emits one
+structured `service_startup` event with `env` and `configured_log_level` (never `DATABASE_URI` or
+`CLOUDAMQP_URL`). As of Project 7 (#74), it then builds the real dependency chain
+(`SqlAlchemyRuleRepository` → `AddIpUseCase` → `CreateRulesCommandHandler` →
+`RabbitMqCommandConsumer`) and starts the consumer — **the process stays running**, consuming
+messages from `RABBITMQ_QUEUE` until stopped with `Ctrl+C` (SIGINT) or SIGTERM, at which point it
+logs `service_shutdown_started`/`service_shutdown_complete` and closes the RabbitMQ connection
+gracefully. It no longer exits immediately - see "RabbitMQ consumer (Project 7)" below for the
+full startup-to-shutdown lifecycle.
 
 ## Tests
 
@@ -276,12 +285,14 @@ verified with a real `.env` present and absent, both ways passing.
 
 ### Purpose
 
-`python-rule-service` is an independent Python service that will eventually
-become the sole writer of firewall configuration changes. This foundation
-phase (#55-#61) builds and proves it **in isolation**: the existing Node.js
-API keeps serving 100% of production traffic unchanged, and this service
-proves its one implemented write path - Add IP - only through direct local
-calls (tests and a manual proof), never through a live request.
+`python-rule-service` is an independent Python service that is now the sole writer of firewall
+configuration changes made through `POST /api/firewall/ips`. Project 6 (#55-#61) built and proved
+the write path **in isolation** - only through direct local calls, never through a live request.
+Project 7 (#70-#75) connected it to real traffic: Node publishes a validated command to RabbitMQ,
+and this service's consumer (see "RabbitMQ consumer (Project 7)" below) is what actually runs this
+same trace for a real, live `POST /api/firewall/ips` request - verified end-to-end in Issue #75.
+The trace itself (steps 2-10 below) is unchanged from Project 6; what changed is *what calls it*
+in production - `CreateRulesCommandHandler` now, not just a test or a manual proof.
 
 ### What each layer owns
 
@@ -291,20 +302,24 @@ this service.
 
 | Layer | Owns | Never imports |
 |---|---|---|
-| `src/main` | Composition root: validated config (`config.py`, #56), the structured logger (`logger.py`, #57), the SQLAlchemy `Engine` (`db.py`, #59), and the entry point (`__main__.py`) that wires them together at startup | - |
+| `src/main` | Composition root: validated config (`config.py`, #56, #70), the structured logger (`logger.py`, #57, #74), the SQLAlchemy `Engine` (`db.py`, #59), and the entry point (`__main__.py`) that wires the repository/use case/handler/consumer together and runs the long-lived process (#74) | - |
 | `src/domain` | Framework-independent business rules: `RuleMode`, the self-validating `NewFirewallRule`/`FirewallRule`, `InvalidIpError` | `application/`, `adapters/`, Pydantic, SQLAlchemy, `structlog` - enforced by a source-scanning test, not just convention |
 | `src/application` | `ApplicationError`, the one type a use case is allowed to raise outward | SQLAlchemy, `structlog` internals beyond calling the shared logger |
 | `src/application/ports` | Abstract contracts a use case depends on (`RuleRepository`) - describes *what* must happen, never *how* | Any concrete adapter |
 | `src/application/use_cases` | Orchestration (`AddIpUseCase`): builds the domain object, translates domain errors, calls the port, logs the outcome | SQLAlchemy directly - only ever the abstract port |
 | `src/adapters/outbound/persistence/postgres` | The **only** place SQLAlchemy is imported anywhere in this service: `schema.py` (maps the existing `firewall_rules` table) and `sqlalchemy_rule_repository.py` (`SqlAlchemyRuleRepository`, the concrete `RuleRepository`) | `domain/` or `application/` never import back into this package |
+| `src/adapters/inbound/rabbitmq` (Project 7, #73-#74) | The **only** place `aio_pika` is imported: `rabbitmq_consumer.py` (`RabbitMqCommandConsumer`), `message_models.py` (the Pydantic queue contract), and `create_rules_command_handler.py` (`CreateRulesCommandHandler`, calls `AddIpUseCase`) | `domain/` never imports this; `application/use_cases/add_ip_use_case.py` has no idea this package exists |
 
 ### Add IP trace - one insertion, entry point to database
 
 1. A caller constructs `AddIpUseCase(repository)`. In production that
    `repository` is a `SqlAlchemyRuleRepository(engine)`, where `engine` is
    `main/db.py`'s SQLAlchemy `Engine`, built once from `settings.DATABASE_URI`
-   (#56). (No file currently performs this construction automatically - see
-   "What `python -m src.main` does today" below.)
+   (#56). As of Project 7, `__main__.py`'s `build_consumer()` performs exactly
+   this construction automatically at startup - see "What `python -m src.main`
+   does today" below, and "RabbitMQ consumer (Project 7)" for what calls
+   `AddIpUseCase.execute()` in production (`CreateRulesCommandHandler`, not a
+   generic "caller").
 2. `AddIpUseCase.execute(mode, value)`
    (`application/use_cases/add_ip_use_case.py`) constructs a
    `NewFirewallRule(mode=mode, value=value)`.
@@ -376,32 +391,66 @@ or other Python migration tool exists in this service, and none is planned.
 
 ### What `python -m src.main` does today
 
-Running it loads and validates `settings` first (#56) - if that fails, the
-process stops before the logger is even configured. If configuration is
-valid, it configures the logger (#57) and emits exactly one structured event,
-whose real name in the code is `service_startup` (with `env` and
-`configured_log_level`, never `DATABASE_URI`), then exits 0. **It does not
-construct a `SqlAlchemyRuleRepository`, does not call `AddIpUseCase`, and does
-not insert a database row automatically** - wiring the real Add IP flow into
-the entry point has not been required by any issue through #61 and is
-intentionally not done here. The full path traced above is proven only
-through the test suite and through the manual, one-off proof performed during
-verification (see the relevant `AI_CONVERSATION_REPORT.md` entries for #59
-and #61).
+**Updated for Project 7 (#74) - this section previously said the entry point did not wire up the
+real Add IP flow. That is no longer true; corrected here rather than left stale.**
+
+Running it loads and validates `settings` first (#56) - if that fails, the process stops before
+the logger is even configured. If configuration is valid, it configures the logger (#57) and emits
+one structured `service_startup` event (`env`/`configured_log_level`, never `DATABASE_URI`/
+`CLOUDAMQP_URL`). It then **does** construct the real chain -
+`SqlAlchemyRuleRepository(engine)` → `AddIpUseCase(repository)` →
+`CreateRulesCommandHandler(add_ip_use_case)` → `RabbitMqCommandConsumer(...)` (`build_consumer()`
+in `__main__.py`) - and starts the consumer, which processes real messages from RabbitMQ and does
+insert database rows automatically, for as long as the process keeps running. See "RabbitMQ
+consumer (Project 7)" below for the full trace from queue message to database row, and "Run" above
+for the lifecycle (it no longer exits after the startup log line).
 
 ### Node.js vs. Python - what moved, what didn't
 
-- **Still entirely in Node.js, unchanged:** HTTP routing (the Express app and
-  all `/api/firewall/*` endpoints), request validation at the HTTP boundary,
-  authentication (none currently exists, and that hasn't changed), and the
-  live endpoints' actual database writes. The Node service continues to serve
-  100% of production traffic exactly as before #55.
-- **Moved to Python, proven in isolation only:** Add IP domain validation,
-  the `AddIpUseCase` orchestration, and persistence into the same
-  `firewall_rules` table via `SqlAlchemyRuleRepository` - exercised only
-  through direct local calls (automated tests plus the manual proof), never
-  through a real HTTP request or production traffic.
-- **Deferred to Project 7 - not designed, not stubbed, not scaffolded:**
-  RabbitMQ, CloudAMQP, Node-to-Python command publication, Python queue
-  consumption, HTTP 202 asynchronous responses, authentication changes, and
-  frontend work.
+**Updated for Project 7 (#70-#75) - this section previously described Project 6's isolated-proof
+state, where nothing here was reachable from real traffic. That has changed for one route; the
+rest of the split still holds.**
+
+- **Still entirely in Node.js, unchanged:** HTTP routing (the Express app and all
+  `/api/firewall/*` endpoints), request validation at the HTTP boundary, authentication (none
+  currently exists, and that hasn't changed), and the direct database writes for `/domains` and
+  `/ports` (and `GET`/`DELETE`/`PATCH`) - those routes are unaffected by Project 7 and still write
+  to PostgreSQL from Node exactly as before.
+- **Moved to Python, and now live in production traffic (Project 7):** for `POST
+  /api/firewall/ips` specifically - Add IP domain validation, the `AddIpUseCase` orchestration, and
+  the actual `firewall_rules` write via `SqlAlchemyRuleRepository`. Node validates the HTTP request
+  and publishes a command; this service is what actually persists it, reached via a real RabbitMQ
+  message, not just direct local calls or a manual proof any more. See "RabbitMQ consumer (Project
+  7)" below.
+- **Still not implemented, by explicit scope choice (not "not yet designed"):** retry/backoff for
+  failed consumer processing, a requeue strategy, and idempotency/duplicate protection. See
+  "Known limitations" in the root `README.md`'s Project 7 section.
+
+## RabbitMQ consumer (Project 7)
+
+This service's inbound half of Project 7's asynchronous flow. For the full two-service picture
+(Node's publisher side, the message contract, the architecture diagram), see the root
+`README.md`'s "Project 7: asynchronous command flow" section - this section covers only the
+Python-side components.
+
+| Component | File | Responsibility |
+|---|---|---|
+| `RabbitMqCommandConsumer` | `src/adapters/inbound/rabbitmq/rabbitmq_consumer.py` | Connects via `aio-pika` (`aio_pika.connect_robust`, injectable for tests), opens one channel, does a *passive* check that `RABBITMQ_QUEUE` already exists (never creates one), and registers a consumer callback. Decides ack/reject - the only file that knows about `aio_pika` types |
+| Message models | `src/adapters/inbound/rabbitmq/message_models.py` | Pydantic `CreateRulesCommand`/`CreateRulesPayload` - validates the untrusted queue payload before anything touches application code, exactly as `ruleValidation.ts` validates Node's HTTP boundary |
+| `CreateRulesCommandHandler` | `src/adapters/inbound/rabbitmq/create_rules_command_handler.py` | The real implementation of the consumer's handler seam. For each value in the command's payload, calls the existing, unmodified `AddIpUseCase.execute(mode, value)` via `asyncio.to_thread()` (since that use case and `SqlAlchemyRuleRepository` are synchronous, blocking code - running them in a worker thread keeps the consumer's event loop unblocked). Binds `operation_id` into `structlog.contextvars` for the duration, so it's automatically included in every log line emitted while processing - including `AddIpUseCase`'s own pre-existing `add_ip_succeeded`/`add_ip_rejected` lines, with zero changes to that file |
+| `__main__.py` | `src/main/__main__.py` | The composition root: `build_consumer()` wires the four objects above together; `run()` starts the consumer, waits for a shutdown signal, then stops it gracefully; `main()` is the thin process entry point |
+
+**ACK/reject behavior** (mirrors the root README's table exactly): a message that fails JSON
+parsing or the Pydantic contract is `reject(requeue=False)`ed and never reaches the handler; a
+message whose handler raises (e.g. the database write fails) is also `reject(requeue=False)`ed,
+never acked as successful; a message is only `ack()`ed once `AddIpUseCase`/
+`SqlAlchemyRuleRepository` return successfully. Failures are not requeued, deliberately - an
+unbounded retry loop with no backoff would hammer a persistently failing dependency forever;
+redelivery/retry/idempotency are out of scope for this phase, not an oversight.
+
+**Verified end-to-end (Issue #75):** one real `POST /api/firewall/ips` request was traced through
+this exact path against the real CloudAMQP instance and local PostgreSQL - `create_rules_command_received`
+→ `add_ip_succeeded` → `create_rules_command_processed`, all carrying the same `operation_id` as
+Node's HTTP response, with the resulting row confirmed in PostgreSQL. Full debugging narrative
+(a local `.env` configuration issue, not a code defect, was found and fixed along the way) is in
+`AI_CONVERSATION_REPORT.md`.

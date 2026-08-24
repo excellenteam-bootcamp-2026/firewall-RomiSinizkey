@@ -31,25 +31,23 @@ verified directly against the controller
 
 ### `POST /api/firewall/ips`
 
-Adds one or more IPv4 rules.
+**Asynchronous, as of Project 7 — see "Project 7: asynchronous command flow" below for the full
+picture.** Validates the request, then publishes a command to RabbitMQ instead of writing to
+PostgreSQL directly.
 
 ```json
-{ "values": ["1.2.3.4", "5.6.7.8"], "mode": "blacklist" }
+{ "values": ["1.2.3.4"], "mode": "blacklist" }
 ```
 
-Success — `201`:
+Success — `202 Accepted`:
 
 ```json
-{
-  "type": "ip",
-  "mode": "blacklist",
-  "values": [
-    { "id": 1, "value": "1.2.3.4", "active": true },
-    { "id": 2, "value": "5.6.7.8", "active": true }
-  ],
-  "status": "success"
-}
+{ "operation_id": "5f2c1e2a-1b3d-4c5e-8f6a-9b0c1d2e3f4a" }
 ```
+
+No database-generated rule ID is returned — Node no longer knows it, since PostgreSQL is now
+written by the Python service after this response is sent, not by Node. See "Project 7" below for
+the full path this request takes after the `202`.
 
 ### `POST /api/firewall/domains`
 
@@ -204,8 +202,13 @@ Every step in this chain — the `RuleRepository` port, all four use cases, and 
 route handlers — is asynchronous (`Promise`-based, using `async`/`await`), so a real database call
 at the bottom of the chain doesn't block the event loop. `InMemoryRuleRepository` still resolves
 immediately (no real I/O), so this is invisible to its behavior; it's what makes
-`DrizzleRuleRepository` a drop-in replacement for it — the same `createApp(repository)` factory
-and the same `RuleRepository` interface are used either way.
+`DrizzleRuleRepository` a drop-in replacement for it — the same `createApp(repository, ...)`
+factory and the same `RuleRepository` interface are used either way.
+
+**`POST /api/firewall/ips` is the one exception to this diagram**, since Project 7: it stops at
+validation, then publishes a command through `CommandPublisher` instead of reaching
+`RuleRepository` at all. `/domains`, `/ports`, `GET`, `DELETE`, and `PATCH` are unaffected and
+still follow the diagram above exactly. See "Project 7: asynchronous command flow" below.
 
 ## Current persistence status
 
@@ -228,6 +231,176 @@ called, the failure is logged, and the process exits with a non-zero code — th
 come up in a half-working, database-less state. See "Server startup and graceful shutdown" below
 for the full sequence, and "Manual API testing" for a persistence check performed against a real
 database.
+
+## Project 7: asynchronous command flow
+
+`POST /api/firewall/ips` is now an asynchronous slice: Node publishes a command instead of writing
+to PostgreSQL directly, and a separate Python service consumes it and performs the actual write.
+`/domains`, `/ports`, `GET`, `DELETE`, and `PATCH` are unaffected — they still follow the
+synchronous flow described above.
+
+### Architecture diagram
+
+```
+Client
+  |
+  v  POST /api/firewall/ips  { "values": ["1.2.3.4"], "mode": "blacklist" }
+Node.js: firewallController.ts
+  |
+  v
+PublishCreateRulesCommandUseCase
+  |  validates mode / non-empty values / IPv4
+  |  generates operation_id (crypto.randomUUID())
+  |  builds the create_rules command
+  v
+CommandPublisher  (application port — no amqplib type crosses this line)
+  |
+  v
+RabbitMqCommandPublisher  (outbound adapter)
+  |  amqplib, one persistent connection + confirm channel, reused across requests
+  v
+CloudAMQP / RabbitMQ
+  exchange:      firewall.commands   (direct)
+  routing key:   romi.rule.create
+  queue:         romi.firewall.commands
+  |
+  v
+Python: RabbitMqCommandConsumer  (inbound adapter, aio-pika)
+  |  JSON-decodes the message body, validates it against the
+  |  CreateRulesCommand Pydantic contract (message_models.py)
+  v
+CreateRulesCommandHandler
+  |  binds operation_id into structlog for this command's duration
+  |  for each value in payload.values:
+  v
+AddIpUseCase  (unmodified from Project 6)
+  |
+  v
+SqlAlchemyRuleRepository  (unmodified from Project 6)
+  |
+  v
+PostgreSQL: firewall_rules
+  |
+  v
+message.ack()   <-  only reached if every step above succeeded
+```
+
+Node's response (`202 Accepted` + `operation_id`) is sent as soon as RabbitMQ confirms the
+publish — **before** any of the Python/PostgreSQL steps below it have necessarily happened. A
+`202` means "queued," not "persisted."
+
+### Component responsibilities
+
+| Component | File | Responsibility |
+|---|---|---|
+| Node producer | `src/adapters/inbound/http/controllers/firewallController.ts`, `src/application/use-cases/PublishCreateRulesCommandUseCase.ts` | Validates the HTTP request, generates `operation_id`, builds the command, calls the publisher — never touches PostgreSQL for this route |
+| `CommandPublisher` port | `src/application/ports/CommandPublisher.ts` | The application-layer interface (`publish(command): Promise<void>`) that hides `amqplib` from every layer above it |
+| `RabbitMqCommandPublisher` adapter | `src/adapters/outbound/rabbitmq/RabbitMqCommandPublisher.ts` | The only file that imports `amqplib`. Owns the connection + confirm channel lifecycle (opened once at startup, reused, closed on shutdown), serializes the command to JSON, publishes, and awaits broker confirmation before resolving |
+| CloudAMQP / RabbitMQ | — (external, hosted by [CloudAMQP](https://www.cloudamqp.com/)) | The durable broker connecting the two services. No local RabbitMQ install or container is used |
+| Exchange | `firewall.commands` (direct) | Routes a published message to the right queue by routing key |
+| Binding / routing key | `<RABBITMQ_ROUTING_PREFIX>.rule.create` → `romi.rule.create` | Binds the student's queue to the exchange so a shared CloudAMQP instance only delivers this project's commands to this project's queue |
+| Queue | `romi.firewall.commands` (durable) | Holds the command until the Python consumer acknowledges it |
+| Python consumer | `python-rule-service/src/adapters/inbound/rabbitmq/rabbitmq_consumer.py` | Connects via `aio-pika`, consumes from the queue, decides ack/reject — knows nothing about `AddIpUseCase` or PostgreSQL |
+| Message models | `python-rule-service/src/adapters/inbound/rabbitmq/message_models.py` | Pydantic `CreateRulesCommand`/`CreateRulesPayload` — validates the untrusted queue payload's shape before anything touches application code |
+| `CreateRulesCommandHandler` | `python-rule-service/src/adapters/inbound/rabbitmq/create_rules_command_handler.py` | Translates a validated command into `AddIpUseCase` calls; binds `operation_id` into structured logs for the duration of processing |
+| `AddIpUseCase` | `python-rule-service/src/application/use_cases/add_ip_use_case.py` | The business operation (unmodified since Project 6) — validates the domain rule, calls the repository |
+| `SqlAlchemyRuleRepository` | `python-rule-service/src/adapters/outbound/persistence/postgres/sqlalchemy_rule_repository.py` | The only file that writes to `firewall_rules` for this flow (unmodified since Project 6) |
+
+### Message contract
+
+The exact, intentionally minimal shape Node publishes and Python validates — no idempotency key,
+correlation ID, config version, or extra metadata:
+
+```json
+{
+  "operation_id": "5f2c1e2a-1b3d-4c5e-8f6a-9b0c1d2e3f4a",
+  "command_type": "create_rules",
+  "payload": {
+    "type": "ip",
+    "mode": "blacklist",
+    "values": ["1.2.3.4"]
+  }
+}
+```
+
+`operation_id` must parse as a UUID; `command_type` must be exactly `"create_rules"`;
+`payload.type` must be exactly `"ip"`; `payload.mode` must be `"blacklist"` or `"whitelist"`;
+`payload.values` must be a non-empty list where every entry is a valid IPv4 address. Any other
+shape is rejected before it reaches `CreateRulesCommandHandler`.
+
+### ACK / reject behavior
+
+| Case | Result |
+|---|---|
+| Invalid JSON, or fails the `CreateRulesCommand` contract | `reject(requeue=False)` — never reaches the handler |
+| Handler raises (e.g. the database write fails) | `reject(requeue=False)` — **not** acked as successful |
+| Handler completes without raising | `ack()` — the only case that acks |
+
+A message is only acknowledged after `AddIpUseCase`/`SqlAlchemyRuleRepository` actually return
+successfully — acking earlier would mean a crash between ack and write permanently loses the
+command, since the broker has already discarded it. Failures are not requeued: an unbounded
+retry loop with no backoff would hammer a persistently-failing dependency (e.g. a down database)
+forever. Redelivery, retry-with-backoff, and idempotency are explicitly deferred — see "Known
+limitations" below.
+
+### Required environment variables
+
+Node reads these four (already listed in "Environment variables" above):
+`CLOUDAMQP_URL`, `RABBITMQ_EXCHANGE`, `RABBITMQ_QUEUE`, `RABBITMQ_ROUTING_PREFIX`.
+
+Python (`python-rule-service/.env`) reads the same four names, validated independently by its own
+Pydantic settings (`python-rule-service/src/main/config.py`) — see
+`python-rule-service/README.md`'s "Configuration" section for the full validation rules. The two
+services never share a settings object or a `.env` file; each must be configured correctly on its
+own.
+
+### Running both services
+
+```bash
+# Terminal 1 — Node.js (repo root)
+npm run dev
+
+# Terminal 2 — Python consumer (python-rule-service/)
+cd python-rule-service
+python -m src.main
+```
+
+Both require PostgreSQL to already be running and reachable, and both require their own `.env` to
+be configured with real CloudAMQP credentials (never committed — see `.env.example` /
+`python-rule-service/.env.example` for the placeholder templates). The Python process is
+long-lived — it stays running, consuming messages, until stopped with `Ctrl+C` (graceful shutdown,
+closing the RabbitMQ connection cleanly).
+
+### End-to-end verification procedure
+
+1. Send `POST /api/firewall/ips` with one IPv4 value; confirm the response is `202 Accepted` with
+   an `operation_id`.
+2. Open the CloudAMQP management dashboard; confirm the queue shows a connected consumer and the
+   Rates graph shows a publish followed by an ack, settling back to 0 ready / 0 unacked.
+3. Check the Python service's logs for the same `operation_id`, in order:
+   `create_rules_command_received` → `add_ip_succeeded` → `create_rules_command_processed`.
+4. Query PostgreSQL directly (or via pgAdmin/DBeaver) for the expected row in `firewall_rules`.
+
+**This procedure was carried out and verified successfully (Issue #75).** Result: `202 Accepted`
+with an `operation_id`; the CloudAMQP dashboard showed 1 connected consumer and an ack immediately
+after the request, draining back to 0 ready / 0 unacked; Python's logs showed the matching
+`operation_id` through all three expected events; and PostgreSQL showed the new row
+(`type=ip, mode=blacklist, value=203.0.113.75, active=true`) — independently confirmed by a direct
+query in addition to DBeaver. The one issue found during this verification was a local
+configuration gap (a leftover placeholder database password in `python-rule-service/.env`, fixed
+by the developer), not a defect in this architecture — full debugging narrative in
+`AI_CONVERSATION_REPORT.md`.
+
+### Known limitations
+
+- **No retry/backoff** for failed consumer processing — a handler failure is rejected once, not
+  retried.
+- **No requeue strategy** — rejected messages (both invalid-contract and handler-failure cases)
+  are dropped (`requeue=False`), not redelivered or dead-lettered.
+- **No idempotency / duplicate protection** — a redelivered or resent message would create a
+  second row; nothing currently detects or prevents that.
+- **`/domains` and `/ports` remain on the synchronous flow** — only `/ips` was moved to the
+  asynchronous RabbitMQ path in Project 7.
 
 ## PostgreSQL and Drizzle setup
 
@@ -288,7 +461,9 @@ with a descriptive error if any are missing or invalid. See `.env.example` for t
 | `RABBITMQ_QUEUE` | This student/project's durable queue name. |
 | `RABBITMQ_ROUTING_PREFIX` | Student-specific routing-key prefix, so a shared CloudAMQP instance only routes commands to this queue. |
 
-RabbitMQ itself is hosted by [CloudAMQP — https://www.cloudamqp.com/](https://www.cloudamqp.com/); there is no local RabbitMQ installation or Docker container in this project's setup.
+RabbitMQ itself is hosted by [CloudAMQP — https://www.cloudamqp.com/](https://www.cloudamqp.com/); there is no local RabbitMQ installation or Docker container in this project's setup. The
+publisher builds the routing key as `` `${RABBITMQ_ROUTING_PREFIX}.rule.create` `` — see "Project
+7: asynchronous command flow" below for the full picture.
 
 ### Integration-test-only variables
 
@@ -461,15 +636,19 @@ repository, and Express app all mocked (see "Testing and verification").
 ## Installation and running
 
 PostgreSQL must already be running and `.env` must be configured before starting the server —
-`npm run dev`/`npm start` now waits for a successful database connection before serving any HTTP
-traffic (see "Server startup and graceful shutdown" above), and `npm run db:migrate` needs the
-same connection too.
+`npm run dev`/`npm start` now waits for a successful database connection (and, since Project 7, a
+successful RabbitMQ connection too) before serving any HTTP traffic (see "Server startup and
+graceful shutdown" above), and `npm run db:migrate` needs the database connection too.
 
 ```bash
 npm install
 npm run db:migrate
 npm run dev
 ```
+
+This starts Node only. `POST /api/firewall/ips` will accept requests and return `202` on its own,
+but nothing will persist the resulting rule to PostgreSQL unless the Python consumer
+(`python-rule-service/`) is also running — see "Project 7: asynchronous command flow" above.
 
 - `npm run dev` — start the API in watch mode.
 - `npm run build` — compile TypeScript to `dist/`.
@@ -795,6 +974,13 @@ There is no PostgreSQL-integration work currently pending from Issues #27–#31 
 server persists rule data in PostgreSQL, verified both by the automated suite and manually (see
 "Testing and verification").
 
+✅ **Done — Project 7, RabbitMQ asynchronous command flow (Issues #70–#75):** `POST
+/api/firewall/ips` publishes to CloudAMQP instead of writing directly; a separate Python service
+consumes, validates, and persists the rule. Verified end-to-end (Issue #75) — see "Project 7:
+asynchronous command flow" above for the full architecture, and its "Known limitations" for what's
+explicitly still missing (retry/backoff, requeue strategy, idempotency) — `/domains` and `/ports`
+remain on the original synchronous flow.
+
 ## How the request flow works (beginner-friendly walkthrough)
 
 This section explains, in plain language, what happens when the server starts and handles a
@@ -806,7 +992,9 @@ request. No prior backend experience needed.
 3. `createApp` (in `app.ts`) builds the Express application: JSON body parsing, request logging,
    the firewall routes, a 404 handler, and an error handler, in that order.
 4. Express starts listening for HTTP requests on `PORT` — only after step 2 has succeeded.
-5. A client (curl, PowerShell, Postman) sends a request, e.g. `POST /api/firewall/ips`.
+5. A client (curl, PowerShell, Postman) sends a request, e.g. `POST /api/firewall/domains`
+   (`/ips` is the one exception to steps 6-9 below — see "Project 7: asynchronous command flow"
+   above for its actual path).
 6. The matching route in `firewallController.ts` extracts the request body and calls the
    corresponding use case.
 7. The use case validates the input (is the IP actually valid? is the mode one of the two

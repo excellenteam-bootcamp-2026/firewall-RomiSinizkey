@@ -1,4 +1,4 @@
-# AI Conversation Report — Issue #75
+# AI Conversation Report — Issue #76
 
 ## Purpose
 
@@ -9,222 +9,222 @@ below.
 
 ## Current state
 
-- **Branch:** `feature/75-rabbitmq-e2e-verification`
-- **Issue:** #75 — `[Tests] Verify the end-to-end RabbitMQ happy flow` — **all 4 acceptance
-  checkpoints verified this session; complete**
-- **Project / Phase:** Project 7 — First Queued Firewall Rule (tracking epic #69), child issue 6 of 7
-- **Base commit:** `e3077ea` — merge of PR #81 (`feature/74-python-consumer-db-wiring`), confirmed
+- **Branch:** `feature/76-project7-docs`
+- **Issue:** #76 — `[Docs] Document and verify Project 7 architecture` — implemented this session,
+  not yet committed
+- **Project / Phase:** Project 7 — First Queued Firewall Rule (tracking epic #69), child issue 7 of
+  7 — **this is Project 7's last child issue**
+- **Base commit:** `5840fd3` — merge of PR #82 (`feature/75-rabbitmq-e2e-verification`), confirmed
   identical to `main` and `origin/main` at branch start (no drift, no stacked/unmerged work)
 
 ## What was already completed before this branch
 
-- **Issues #70–#74 — all complete, merged.** The full asynchronous pipeline existed in code:
-  Node validates and publishes a `create_rules` command (`202 Accepted` + `operation_id`); the
-  command reaches CloudAMQP; Python's `RabbitMqCommandConsumer` consumes, validates, and (as of
-  #74) calls `AddIpUseCase` → `SqlAlchemyRuleRepository` → PostgreSQL, acking only after success.
-  What had **not** yet happened was running this path for real, once, and observing every step —
-  that is this issue's entire purpose.
+- **Issues #70–#75 — all complete, merged, and verified end-to-end.** The full asynchronous
+  pipeline exists in code and has been proven working against real infrastructure: Node validates
+  and publishes; CloudAMQP routes the message; Python consumes, validates, persists, and acks only
+  on success. What had **not** yet happened was making the repository's own documentation say any
+  of this — the two READMEs still described the pre-Project-7 world in several places, some of
+  them actively incorrect rather than merely incomplete.
 
-## What this branch was intended to implement (Issue #75 scope)
+## What this branch was intended to implement (Issue #76 scope)
 
-No code. This issue is a manual verification exercise: run one real `POST /api/firewall/ips`
-request through the complete live system (real CloudAMQP, real local PostgreSQL, both services
-running as real processes) and confirm every stage actually happens as designed.
+No application behavior change. Document the final Project 7 architecture in both READMEs, verify
+every documented claim against the actual current code (not against memory or the original plan),
+and correct anything found to be stale.
 
 ## Conversation / Reasoning Summary
 
-**Preparation (earlier this session, read-only):** before any request was sent, this session did
-a read-only inspection pass — confirmed the branch was cleanly based on merged `main`, re-traced
-the runtime flow file-by-file against actual current code, verified both services' config loaded
-successfully, independently re-checked the CloudAMQP queue existed via its Management API, checked
-PostgreSQL was already running locally and the `firewall_rules` table already existed, and produced
-an exact terminal-by-terminal execution plan (Node command, Python command, POST body, SQL
-verification query) for the user to run. No request was sent and nothing was modified during that
-pass.
+- **Why this issue started with inspection rather than writing.** Before adding anything, this
+  session read every relevant section of both READMEs against the actual current source — not to
+  confirm the docs were already fine, but specifically looking for drift. This found real
+  problems, not just gaps.
 
-**First real attempt — partial success, then a stop.** The user ran the plan. Node returned `202`
-as expected, and the command genuinely reached Python: Terminal 3 logged
-`create_rules_command_received`, proving the full chain up to that point — Node → RabbitMQ →
-`RabbitMqCommandConsumer` → JSON parsing → Pydantic validation → `CreateRulesCommandHandler` entry
-— was already working correctly. Immediately after, it logged `rabbitmq_message_handler_failed`
-instead of `add_ip_succeeded`/`create_rules_command_processed`. Per Issue #74's ACK/NACK design,
-this correctly meant the message was `reject`ed rather than acked — the failure-handling code
-built in #74 behaved exactly as designed, catching the failure instead of silently losing or
-falsely acking the message.
+- **What was found stale — and why each one mattered:**
+  - Root `README.md`'s `POST /api/firewall/ips` section still documented a synchronous `201`
+    response with database-generated rule IDs. This is the single most user-facing piece of
+    documentation in the repository for this exact endpoint, and it described behavior that
+    stopped being true back in Issue #72.
+  - The "Request flow" diagram, "Current persistence status", and the beginner-friendly walkthrough
+    all described **every** route going straight from controller → use case → `RuleRepository`,
+    with no mention that `/ips` diverges. Left as-is, a reader would have no way to know `/ips` is
+    now the exception.
+  - `python-rule-service/README.md` was the more serious case: its "What `python -m src.main` does
+    today" section stated, in bold, that the entry point "does not construct a
+    `SqlAlchemyRuleRepository`, does not call `AddIpUseCase`, and does not insert a database row
+    automatically." Every clause of that sentence became false in Issue #74. Its "Run" section
+    still said the process "exits 0" after one log line — also false; it's long-lived now. Its
+    closing "Node.js vs. Python" section still listed RabbitMQ/CloudAMQP/Node-to-Python publication
+    under "Deferred to Project 7 - not designed, not stubbed, not scaffolded" — the exact opposite
+    of the repository's actual state after Issues #70-#75.
+  - Decision made: correct these in place with an explicit editorial note (rather than silently
+    rewriting), so anyone who read the old version and now reads the diff can see exactly what
+    changed and why, instead of the correction being invisible.
 
-**Diagnosis.** Because the failure surfaced specifically as `rabbitmq_message_handler_failed`
-(not a parse/validation error, and not silence), the fault was isolated to *inside* the handler's
-call chain — i.e. somewhere in `CreateRulesCommandHandler` → `AddIpUseCase` →
-`SqlAlchemyRuleRepository` → PostgreSQL — rather than anywhere earlier in the pipeline. That
-narrowed it to one live possibility: Python's own database connectivity. Investigation found the
-cause: `python-rule-service/.env` still had the placeholder value copied from
-`.env.example` —
-```
-DATABASE_URI=postgresql+psycopg://postgres:change_me@localhost:5432/firewall_dev
-```
-— i.e. Python was still trying to authenticate to the real local PostgreSQL with the literal
-placeholder password `change_me`, which was never the real local database password. Node's own
-`.env` had the correct real password (Node's write path had already been proven working in earlier
-issues), but Python's separate `.env` — read independently via its own Pydantic settings, by
-design, since Project 6 — had never been updated with the real value.
+- **Why the new Project 7 section was written once, in the root README, rather than duplicated in
+  both READMEs.** The full architecture diagram, the message contract, and the ACK/reject table
+  live in `README.md` as the canonical version. `python-rule-service/README.md`'s new "RabbitMQ
+  consumer (Project 7)" section covers only the Python-side component table and points back to the
+  root README for the shared diagram/contract — avoiding two copies that could drift apart from
+  each other the same way the old docs had already drifted from the code.
 
-**Fix.** The user manually edited the real, gitignored `python-rule-service/.env` and replaced the
-placeholder password with the correct local PostgreSQL password. **The real password is not
-recorded here or anywhere in this repository's tracked files**, consistent with this file's
-standing rule never to contain secrets.
-
-**Re-verification.** A direct Python → PostgreSQL connection test then succeeded. The Python
-consumer was restarted (picking up the corrected `.env`), a fresh `POST /api/firewall/ips` request
-was sent, Node again returned `202` with a fresh `operation_id`, and this time Python's logs showed
-the full success sequence (`create_rules_command_received` → `add_ip_succeeded` →
-`create_rules_command_processed`) instead of the failure. The row was manually confirmed in
-PostgreSQL via DBeaver, and independently re-confirmed in this session by a direct read-only query
-against the live table — both agree exactly (see "Final database evidence" below).
-
-**Conclusion, stated explicitly per the user's request:** the original failure was a **local
-environment configuration gap** (a leftover placeholder credential in one service's `.env`) — not
-a defect in the RabbitMQ architecture, the message contract, the consumer's ack/reject logic, or
-any application code. Every piece of code built across Issues #70–#74 behaved exactly as designed,
-including correctly *catching and reporting* the credential failure rather than masking it. This
-distinction matters: it means the E2E failure was diagnostic evidence that the failure-handling
-code (`reject(requeue=False)` on handler failure, from #74) works correctly, not a sign anything
-needed to be rebuilt.
+- **Why the verification claims in the docs cite specific evidence rather than just asserting
+  success.** The new "End-to-end verification procedure" section in the root README doesn't just
+  say "this works" — it names the exact log event names (verified directly against
+  `rabbitmq_consumer.py`, `create_rules_command_handler.py`, `add_ip_use_case.py`, and
+  `__main__.py` via `grep`, not recalled from memory) and the exact Issue #75 result (`202` +
+  `operation_id`; CloudAMQP showed 1 consumer and an ack; PostgreSQL row confirmed), matching what
+  `AI_CONVERSATION_REPORT.md` already recorded for Issue #75.
 
 ## AI Explanations Provided
 
-- **Why `rabbitmq_message_handler_failed` (and not silence, and not a parse error) was actually
-  good news mid-debugging** — it's the exact log line #74 added specifically so a handler-level
-  failure would be visible and distinguishable from a validation failure. Seeing it proved the
-  message had already survived parsing and Pydantic validation, narrowing the search space
-  immediately to "something inside the handler's own call chain," instead of leaving it ambiguous.
-- **Why Node's correct DB password didn't help Python** — the two services deliberately read
-  *separate* `.env` files via *separate* config loaders (a Project 6 design decision, so Node and
-  Python never share a settings object). Fixing one has no effect on the other; each service's
-  credentials must be correct independently.
-- **Why a failed insert can still "use up" a database ID** — PostgreSQL's `serial`/sequence
-  counters are not transactional. A rolled-back or failed `INSERT` still advances the sequence.
-  This is why the final successful row landed as `id: 5` rather than `id: 2` — the gap (ids 2–4)
-  is exactly the number of earlier failed attempts, an independent physical trace of the debugging
-  history, not a discrepancy.
-- **Why "202 Accepted" alone was never going to be enough proof** — it only proves Node validated
-  and got a broker confirmation for the *publish*. This issue exists precisely because a `202`
-  says nothing about whether Python ever consumed, processed, or persisted the command — which is
-  exactly what the first attempt's silent-to-Node, failed-in-Python outcome demonstrated concretely.
+Architecture concepts discussed and documented across Project 7, in compact form:
+
+- **Exchange vs. Queue** — an exchange (`firewall.commands`, type `direct`) is a routing rule, not
+  storage; it decides *where* a published message goes based on its routing key. A queue
+  (`romi.firewall.commands`) is what actually holds the message until a consumer acks it. A message
+  is never "in" the exchange — it's routed through it into a queue.
+- **Binding and routing key** — the binding is the standing rule connecting an exchange to a queue
+  ("route anything with routing key X to this queue"); the routing key (`romi.rule.create`) is the
+  label a publisher attaches to one specific message so the exchange knows which binding applies.
+  Built from `RABBITMQ_ROUTING_PREFIX` specifically so a shared CloudAMQP instance can host
+  multiple students' queues without cross-delivery.
+- **Producer vs. Consumer** — Node is the producer (`RabbitMqCommandPublisher`, publishes and never
+  reads from the queue). Python is the consumer (`RabbitMqCommandConsumer`, reads and acks/rejects,
+  never publishes). Each only ever plays one role in this architecture.
+- **`amqplib` vs. `aio-pika`** — the same protocol (AMQP 0-9-1), two different language ecosystems'
+  clients: `amqplib` (Node, callback/Promise-based, used only inside `RabbitMqCommandPublisher.ts`)
+  and `aio-pika` (Python, `asyncio`-native, used only inside `rabbitmq_consumer.py`). Neither type
+  from either library is allowed to leak outside its one adapter file.
+- **Controller vs. Use Case** — the controller (`firewallController.ts`) is the HTTP-specific
+  translation layer: reads `req.body`, calls a use case, writes `res.status(...).json(...)`. The
+  use case (`PublishCreateRulesCommandUseCase`, `AddIpUseCase`) is the actual business logic and
+  has no idea Express or HTTP exists — the same use case logic would work if called from a CLI or
+  a test.
+- **Interface/port vs. concrete adapter** — `CommandPublisher` (TypeScript interface) and
+  `RuleRepository` (Python ABC) describe *what* must be possible without saying *how*.
+  `RabbitMqCommandPublisher`/`SqlAlchemyRuleRepository` are the concrete "how." Application code
+  depends only on the port type, which is what let RabbitMQ get added without changing
+  `AddRulesUseCase` or any other existing use case.
+- **`CommandPublisher`** — the one-method port (`publish(command): Promise<void>`) that hides
+  `amqplib` from every layer above `RabbitMqCommandPublisher.ts`. `PublishCreateRulesCommandUseCase`
+  depends on this type, never on the concrete adapter.
+- **Handler responsibilities** — `CreateRulesCommandHandler` is deliberately thin: it does not
+  re-validate anything Pydantic already checked, does not know about RabbitMQ, and does not know
+  about `aio_pika`. Its only job is translating one validated command into one or more
+  `AddIpUseCase.execute()` calls, plus binding `operation_id` for the duration.
+- **ACK semantics** — ack tells the broker "permanently discard this, it's fully handled." Only
+  sent after `AddIpUseCase`/`SqlAlchemyRuleRepository` return successfully — never earlier, since
+  an early ack followed by a crash would silently lose the command. A handler failure or a
+  contract-validation failure both result in `reject(requeue=False)`, deliberately not requeued
+  (would otherwise retry a persistent failure forever, with no backoff).
+- **Why `__main__.py` wires dependencies but doesn't process each message itself** — it's the
+  composition root, the same role `main/startServer.ts` plays on the Node side: `build_consumer()`
+  constructs the object graph exactly once, at startup; `run()` starts the consumer and waits for a
+  shutdown signal. Per-message work happens entirely inside `RabbitMqCommandConsumer`/
+  `CreateRulesCommandHandler` — `__main__.py` never sees an individual message.
+- **The Python file-by-file execution flow, restated for the docs:** `RabbitMqCommandConsumer
+  ._on_message()` → `_parse()` (JSON + Pydantic, `message_models.py`) →
+  `CreateRulesCommandHandler.__call__()` (`create_rules_command_handler.py`) →
+  `asyncio.to_thread(AddIpUseCase.execute)` (`add_ip_use_case.py`, unmodified) →
+  `SqlAlchemyRuleRepository.add()` (`sqlalchemy_rule_repository.py`, unmodified) → PostgreSQL →
+  `message.ack()`. Documented as a diagram in both READMEs now, not just in this report.
 
 ## Verbatim Excerpts From This Session
 
-**User, reporting the debugging sequence, verbatim list:**
-> 1. The first real E2E attempts reached Python successfully.
-> 2. Python logged:
->    create_rules_command_received
->    followed by:
->    rabbitmq_message_handler_failed
-> 3. This proved that:
->    Node → RabbitMQ → Python consumer → message parsing/handler entry
->    were already working.
-> 4. Investigation found that Python could not authenticate to PostgreSQL.
-> 5. python-rule-service/.env still had the placeholder:
->    DATABASE_URI=postgresql+psycopg://postgres:change_me@localhost:5432/firewall_dev
-> 6. The user manually replaced the placeholder password with the correct local PostgreSQL
->    password.
+**User, defining the goal, verbatim:**
+> Document the final Project 7 architecture accurately and verify that the repository
+> documentation matches the actual implementation.
 
-**User, on what this report must and must not say about the root cause:**
-> Also record that the earlier failure was local environment configuration, not an
-> application-code/RabbitMQ architecture defect.
+**User, on what counts as done for this issue:**
+> Verification:
+> Compare the documentation against the actual code.
+> If documentation is stale or contradicts implementation, correct it.
 
-**User, explicit instruction on secrecy, verbatim:**
-> Do NOT record or expose the real password or any CloudAMQP credentials.
+**User, scope boundary, verbatim:**
+> Do not modify Node or Python application behavior.
+> Do not add new dependencies.
+> Do not start Project 8 or any later work.
 
-**User, confirming the previously-open CloudAMQP dashboard checkpoint after being asked directly:**
-> Yes. I verified the CloudAMQP/LavinMQ dashboard during the successful E2E run.
->
-> The queue romi.firewall.commands showed 1 connected consumer, and the Rates graph showed message
-> activity including an ACK after the POST request was sent.
->
-> The queue returned to 0 Ready / 0 Unacked after processing.
->
-> This confirms the CloudAMQP dashboard acceptance criterion for Issue #75.
+## What was actually documented
 
-## Final database evidence
+**Modified files (both pre-existing, tracked; no new file created):**
 
-Independently re-confirmed this session via a direct, read-only query against the live
-`firewall_rules` table (not just taken on report):
+- **`README.md`** — corrected the stale `POST /api/firewall/ips` section (`201`→`202` +
+  `operation_id`, no DB IDs returned); added callouts to the "Request flow" diagram, "Current
+  persistence status", "Installation and running", and the beginner walkthrough noting `/ips` is
+  the one exception; added the routing-key construction detail to the existing env-var table;
+  added Project 7's completion status to "Current limitations / roadmap"; and added the new
+  **"Project 7: asynchronous command flow"** section — architecture diagram, a responsibility table
+  for all 11 components the issue asked for, the exact message contract, the ACK/reject table,
+  required env vars for both services, how to run both services, the E2E verification procedure,
+  the recorded Issue #75 result, and the four explicitly-required known limitations.
+- **`python-rule-service/README.md`** — corrected the intro paragraph, the "Structure" tree (added
+  `adapters/inbound/rabbitmq/` and its three new test files), the "Run" section (no longer "exits
+  0"), the "Purpose" subsection, the "What each layer owns" table (new `adapters/inbound/rabbitmq`
+  row), the "Add IP trace" step 1, the "What `python -m src.main` does today" section (previously
+  actively false, now corrected with an explicit note), and the "Node.js vs. Python - what moved,
+  what didn't" closing section; added the new **"RabbitMQ consumer (Project 7)"** section (the
+  Python-side component table, ACK/reject behavior, and the Issue #75 verification record) — this
+  points back to the root README for the shared diagram/message contract rather than duplicating
+  them.
 
-| id | type | mode | value | active |
-|---|---|---|---|---|
-| 5 | ip | blacklist | `203.0.113.75` | true |
+## Stale documentation found (and corrected)
 
-`203.0.113.75` is the E2E test value used throughout this verification — drawn from
-`203.0.113.0/24` (RFC 5737 "TEST-NET-3"), a block permanently reserved for documentation and never
-assigned to a real host, chosen specifically so it's unambiguous which row was created by this
-test versus any pre-existing data (a separate, older row, `id: 1`, `value: 192.168.1.200`, already
-existed in the table from before this issue and is unrelated to this verification).
+| Location | Was | Now |
+|---|---|---|
+| `README.md`, `/ips` endpoint doc | `201` + DB-generated rule IDs | `202` + `operation_id`, cross-referenced to the new Project 7 section |
+| `README.md`, Request flow / persistence / walkthrough | Described every route uniformly | Explicit `/ips`-is-the-exception callouts added |
+| `python-rule-service/README.md`, "What `python -m src.main` does today" | Stated it does *not* construct the repository, call `AddIpUseCase`, or insert rows | Corrected: it does all three, via `build_consumer()`, as of Issue #74 |
+| `python-rule-service/README.md`, "Run" | Stated the process "exits 0" | Corrected: long-lived, stays running until `Ctrl+C`/SIGTERM |
+| `python-rule-service/README.md`, "Node.js vs. Python" | Listed RabbitMQ/CloudAMQP/Node-to-Python publication under "Deferred to Project 7 - not designed, not stubbed, not scaffolded" | Corrected: implemented, live, and verified end-to-end |
 
-## Complete flow, now proven end-to-end
+## Final documented architecture (summary)
 
 ```
-POST /api/firewall/ips
-  -> Node.js HTTP controller
-  -> PublishCreateRulesCommandUseCase
-  -> CommandPublisher (port)
-  -> RabbitMqCommandPublisher (adapter)
-  -> amqplib
-  -> CloudAMQP exchange: firewall.commands
-       routing key: romi.rule.create
-  -> queue: romi.firewall.commands
-  -> Python RabbitMqCommandConsumer
-  -> CreateRulesCommandHandler
-  -> AddIpUseCase
-  -> SqlAlchemyRuleRepository
-  -> PostgreSQL firewall_rules   [id: 5, confirmed]
+POST /api/firewall/ips -> Node.js (validate, generate operation_id, publish)
+  -> CommandPublisher -> RabbitMqCommandPublisher -> amqplib
+  -> CloudAMQP: exchange firewall.commands, routing key romi.rule.create, queue romi.firewall.commands
+  -> Python: RabbitMqCommandConsumer (aio-pika) -> Pydantic CreateRulesCommand validation
+  -> CreateRulesCommandHandler -> AddIpUseCase -> SqlAlchemyRuleRepository -> PostgreSQL
+  -> ack (only after success)
+```
+Fully documented in `README.md`'s "Project 7: asynchronous command flow" and
+`python-rule-service/README.md`'s "RabbitMQ consumer (Project 7)", cross-referencing each other
+rather than duplicating.
+
+## Tests / checks run and their results
+
+```
+npm run lint   → passed (tsc --noEmit, no errors)
+npm test       → 217 passed, 17 skipped, 0 failed
+                 (first run showed 1 failure - the same pre-existing cold-import CPU-contention
+                 flake in Logger.test.ts's Singleton test seen earlier this session, documented in
+                 vitest.config.mts's own comments; passed clean on immediate re-run, confirming it
+                 wasn't caused by this session's doc-only changes)
+
+python -m pytest -q   → 119 passed, 5 skipped, 0 failed   (unchanged from before this branch)
 ```
 
-All four of the issue's required checkpoints were directly observed:
-
-1. Node's `202` + `operation_id`.
-2. The CloudAMQP management dashboard — confirmed by the user in a follow-up after being asked
-   directly (see "Verbatim Excerpts" below): the `romi.firewall.commands` queue showed **1
-   connected consumer**, the Rates graph showed message activity including an **ACK** right after
-   the request was sent, and the queue returned to **0 Ready / 0 Unacked** once processing
-   finished — the exact publish → deliver → ack → drain-back-to-zero cycle this architecture is
-   supposed to produce. One incidental detail from that confirmation: the dashboard in question is
-   backed by a **LavinMQ** instance rather than RabbitMQ itself — CloudAMQP offers both as
-   interchangeable managed-broker backends, and since this project only ever talks to it over the
-   standard AMQP 0-9-1 protocol (via `amqplib`/`aio-pika`) and its RabbitMQ-compatible HTTP
-   Management API (used earlier this session for the read-only pre-flight queue check), this makes
-   no difference to anything built or verified — worth recording for accuracy, not a concern.
-3. Python's structured logs carrying the matching `operation_id` through
-   `create_rules_command_received` → `add_ip_succeeded` → `create_rules_command_processed`.
-4. The resulting row confirmed in PostgreSQL by two independent means (DBeaver, and a direct
-   query).
-
-**The complete asynchronous flow is now proven to work end-to-end, with all four of Issue #75's
-acceptance criteria satisfied.**
-
-## Source code / test changes this issue
-
-**None.** `git status`/`git diff` show zero changes under `src/`, `tests/`, or
-`python-rule-service/` — confirmed directly, not assumed. This is expected and correct: Issue #75
-is a verification exercise, not an implementation issue. The only artifact this issue produces is
-this report update plus the GitHub issue/Board state change recording the verified result.
+`git diff --stat -- src/ tests/ python-rule-service/src/ python-rule-service/tests/` is empty —
+confirmed directly, not assumed: **zero application or test code changed this session.** Only
+`README.md` and `python-rule-service/README.md` were modified.
 
 ## Known limitations / remaining work
 
-- Redelivery, retry-with-backoff, and idempotency remain unimplemented, as intended — still
-  deferred to a later phase, unaffected by this issue.
-- `python-rule-service` is still not part of `docker-compose.*.yml` — this E2E run used both
-  services running locally by hand, exactly as the plan called for.
-- Only the single documented happy-path slice (one IP value, `blacklist` mode) has been verified.
-  No other command shapes, failure-injection scenarios, or load conditions were exercised — matches
-  this issue's own scope, which explicitly says not to add further command types yet.
-- The real, gitignored `python-rule-service/.env` now holds the corrected password locally; no
-  tracked file changed as a result, and this report deliberately does not restate the value.
+- This issue only updates the two READMEs. `AI_CONVERSATION_REPORT.md`'s own historical entries
+  for earlier issues were not rewritten to match (by design — this file's own stated convention is
+  that it covers only the current branch's issue at any given time, with history preserved via
+  `git log` once each issue merges).
+- Project 7's own known limitations (no retry/backoff, no requeue strategy, no idempotency,
+  `/domains`/`/ports` remain synchronous) are now documented in both READMEs, not just in this
+  report — but remain genuinely unimplemented, as intended, and are out of this issue's scope to
+  fix.
 
 ## Explicit note
 
-Node.js was not modified. Python application code was not modified — the fix was a local
-environment/configuration correction (a real, gitignored `.env` value), not a code change, and is
-not reflected in any tracked diff. **Issue #76 (documentation/architecture verification) has not
-started.**
+Node.js and Python application behavior were not modified in any way — confirmed via an empty
+`git diff` on every `src/`/`tests/` path in both services. No new dependency was added. **Project 8
+(or any work beyond Project 7) has not started.** This is Project 7's last planned child issue;
+once this is committed and merged, epic #69 has no open child issues remaining.
 
 Nothing was staged, committed, or pushed this session.
