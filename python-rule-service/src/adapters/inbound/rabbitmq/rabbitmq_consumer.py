@@ -7,8 +7,10 @@ from pydantic import ValidationError
 from src.adapters.inbound.rabbitmq.message_models import CreateRulesCommand
 from src.main.logger import logger
 
-# The handler seam Issue #74 will implement - it receives an already-validated
-# command and is expected to run the create-rules use case against PostgreSQL.
+# The handler seam - receives an already-validated command and runs the
+# create-rules use case against PostgreSQL. See
+# src/adapters/inbound/rabbitmq/create_rules_command_handler.py for the real
+# implementation wired in by src/main/__main__.py.
 CommandHandler = Callable[[CreateRulesCommand], Awaitable[None]]
 
 # Injectable so tests never need a real CloudAMQP connection - defaults to the
@@ -27,16 +29,27 @@ class RabbitMqCommandConsumer:
 
     Constructed from an explicit ``url``/``queue_name`` (not by importing
     ``settings`` itself), so it can be unit-tested without real config or a
-    network connection. Issue #74's entrypoint wiring is expected to
-    construct this from ``settings.CLOUDAMQP_URL`` / ``settings.RABBITMQ_QUEUE``.
+    network connection. ``src/main/__main__.py`` constructs this from
+    ``settings.CLOUDAMQP_URL`` / ``settings.RABBITMQ_QUEUE``.
 
-    Issue #73 scope only: ack/reject here covers the *validation* boundary -
-    a message that fails to parse as JSON or fails the Pydantic contract is
-    rejected (not requeued) and never reaches the handler. A message that
-    passes validation is acked once the handler has been *called*. This is
-    NOT the final "ack only after the database write succeeds" semantics,
-    and nothing here decides what happens if the handler itself raises -
-    both belong to Issue #74.
+    ACK/NACK behavior (Issue #74 - final for this phase):
+
+    - Message fails to parse as JSON, or fails the Pydantic contract ->
+      ``reject(requeue=False)``. Never reaches the handler.
+    - Handler raises (e.g. the database write fails) -> ``reject(requeue=False)``.
+      Not acked as successful.
+    - Handler completes without raising -> ``ack()``. This is the only case
+      that acks - i.e. only after ``AddIpUseCase``/``SqlAlchemyRuleRepository``
+      have actually written the row (Issue #74's ``CreateRulesCommandHandler`` -
+      not this module - is what makes the handler synchronous with the DB write).
+
+    Deliberately not requeuing on handler failure: a persistent failure (e.g.
+    the database being down) requeued with no backoff would redeliver the
+    same message in a tight loop, hammering the broker and the database
+    forever. Exercise 7's own materials explicitly defer "the detailed
+    behavior of acknowledgements and redelivery" to a later phase - retry
+    with backoff and any redelivery/idempotency strategy are out of scope
+    here, not silently forgotten.
     """
 
     def __init__(
@@ -75,7 +88,13 @@ class RabbitMqCommandConsumer:
             await message.reject(requeue=False)
             return
 
-        await self._handler(command)
+        try:
+            await self._handler(command)
+        except Exception:
+            logger.error("rabbitmq_message_handler_failed", operation_id=command.operation_id)
+            await message.reject(requeue=False)
+            return
+
         await message.ack()
 
     def _parse(self, body: bytes) -> CreateRulesCommand | None:

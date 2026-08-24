@@ -142,6 +142,38 @@ class TestValidMessage:
         assert message.reject_calls == []
 
 
+class TestHandlerFailure:
+    async def test_a_raising_handler_is_not_acked(self) -> None:
+        handler = AsyncMock(side_effect=RuntimeError("database is down"))
+        consumer, _urls, connection = build_consumer(handler=handler)
+        await consumer.start()
+        message = FakeIncomingMessage(VALID_BODY)
+
+        await connection.fake_channel.queue.consumed_callback(message)
+
+        assert message.ack_calls == 0
+
+    async def test_a_raising_handler_results_in_a_reject_without_requeue(self) -> None:
+        handler = AsyncMock(side_effect=RuntimeError("database is down"))
+        consumer, _urls, connection = build_consumer(handler=handler)
+        await consumer.start()
+        message = FakeIncomingMessage(VALID_BODY)
+
+        await connection.fake_channel.queue.consumed_callback(message)
+
+        assert message.reject_calls == [False]
+
+    async def test_a_raising_handler_does_not_crash_the_consumer_callback(self) -> None:
+        # _on_message itself must not raise, or aio_pika's own consumer loop
+        # would see an unhandled exception from the callback.
+        handler = AsyncMock(side_effect=RuntimeError("database is down"))
+        consumer, _urls, connection = build_consumer(handler=handler)
+        await consumer.start()
+        message = FakeIncomingMessage(VALID_BODY)
+
+        await connection.fake_channel.queue.consumed_callback(message)  # must not raise
+
+
 class TestInvalidMessages:
     async def test_invalid_json_is_rejected_without_requeue_and_handler_is_not_called(self) -> None:
         handler = AsyncMock()
