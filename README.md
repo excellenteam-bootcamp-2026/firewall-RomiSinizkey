@@ -288,8 +288,8 @@ Success — `202 Accepted`:
 ```
 
 No database-generated rule ID is returned — Node no longer knows it, since PostgreSQL is now
-written by the Python service after this response is sent, not by Node. See "Project 7" below for
-the full path this request takes after the `202`.
+written by the Python service after this response is sent, not by Node. See "Project 7:
+asynchronous command flow" below for the full path this request takes after the `202`.
 
 ### `POST /api/firewall/domains`
 
@@ -1088,7 +1088,7 @@ PostgreSQL data lives in a named volume per environment — `postgres_data_dev` 
 `postgres_data_prod` — mounted at `/var/lib/postgresql/data`. These are two entirely separate
 volumes: a production-mode run can never see development data, or vice versa. A named volume
 survives `docker compose down`, container recreation, and image rebuilds; it is **not** deleted
-unless you explicitly ask for that (see "Cleanup" below). The backend's own `node_modules` also
+unless you explicitly ask for that (see "Docker cleanup" below). The backend's own `node_modules` also
 lives in a named volume in development (`backend_node_modules`), for the unrelated reason of
 keeping the host's `node_modules` from shadowing the image's under the source bind mount.
 
