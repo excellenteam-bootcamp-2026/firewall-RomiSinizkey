@@ -57,6 +57,39 @@ services:
     # Docker, native filesystem) is untouched and still uses native watching.
     command: sh -c "npm run db:migrate:dev && npm run dev:docker"
 
+  python-consumer:
+    build:
+      context: ./python-rule-service
+      target: development
+    env_file:
+      # Loads python-rule-service/.env.dev — deliberately its own file, not
+      # the root .env.dev: the two services are independently configured
+      # (see the root README's "Project 7" section), and the Node backend's
+      # env_file above is never shared with this service. DATABASE_URI inside
+      # that file points at host "postgres" (this Compose network's Postgres
+      # service name), and CLOUDAMQP_URL points at the same hosted RabbitMQ
+      # instance the Node backend publishes to — there is no local RabbitMQ
+      # container here or anywhere else in this Compose file.
+      - python-rule-service/.env.dev
+    depends_on:
+      postgres:
+        # Same reasoning as the backend service above: waits for Postgres to
+        # actually accept connections, not just for its container to start.
+        condition: service_healthy
+    volumes:
+      # Bind-mounts the service over /app for hot code visibility. Unlike the
+      # backend's node_modules above, no shadowing named volume is needed
+      # here: pip installs into the image's system site-packages (not into
+      # /app), so the bind mount never overwrites installed dependencies.
+      - ./python-rule-service:/app
+    # No hot-reload/auto-restart tool: see python-rule-service/README.md's
+    # "Docker development hot reload" section for why (in short: the file
+    # watcher problem Node's --poll addresses is well understood, but Python's
+    # only options carry the same platform reliability risk without the
+    # `dev:docker` workaround's history of testing — restart manually instead:
+    # `npm run dev:restart:python`).
+    command: python -m src.main
+
 volumes:
   postgres_data_dev:
   backend_node_modules:

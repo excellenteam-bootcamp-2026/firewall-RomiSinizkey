@@ -4,6 +4,248 @@ A Node.js and TypeScript orchestrator API for managing firewall rules — IP add
 and ports — organized into blacklist and whitelist lists. The project is structured with
 Hexagonal (Ports & Adapters) Architecture, and persists rules in PostgreSQL via Drizzle ORM.
 
+## New Computer Setup
+
+One-time steps after cloning this repository, before daily development. Requires
+[Docker Desktop](https://www.docker.com/products/docker-desktop/) (or a Docker Engine + Compose v2
+install) — see "Docker prerequisites" below for how to confirm it's actually running, not just
+installed.
+
+1. **Create the two local environment files** — each is copied from a committed, safe template
+   and then filled in with real values. Neither is ever committed (`.gitignore` blocks
+   `.env.dev`/`python-rule-service/.env.dev` everywhere in this repo, while explicitly allowing
+   the `.example` templates):
+   ```bash
+   cp .env.dev.example .env.dev
+   cp python-rule-service/.env.dev.example python-rule-service/.env.dev
+   ```
+2. **Fill in credentials that must be set manually** — both files ship with placeholder values
+   that work for local development *except* the CloudAMQP line, which must point at a real hosted
+   RabbitMQ instance:
+   - In `.env.dev` **and** `python-rule-service/.env.dev`: replace `CLOUDAMQP_URL` with your real
+     [CloudAMQP](https://www.cloudamqp.com/) connection URL (and the matching
+     `RABBITMQ_QUEUE`/`RABBITMQ_ROUTING_PREFIX` if you don't use the defaults). Use the **same**
+     CloudAMQP URL in both files — Node publishes and Python consumes from the same broker.
+   - The `POSTGRES_USER`/`POSTGRES_PASSWORD`/`POSTGRES_DB` in `.env.dev` and the matching
+     `postgres:...@postgres:5432/...` segment of `python-rule-service/.env.dev`'s `DATABASE_URI`
+     already agree with each other out of the box (both default to `change_me`) — change the
+     password in both places together if you want a non-default one, since PostgreSQL's container
+     is initialized from `.env.dev` alone but Python connects using its own file.
+3. **Start everything** (see "Daily Development" below) and confirm it comes up cleanly:
+   ```bash
+   npm run dev:all
+   npm run dev:logs
+   ```
+
+## Daily Development
+
+Normal day-to-day development is one command:
+
+```bash
+npm run dev:all
+```
+
+This runs `docker compose --env-file .env.dev -f docker-compose.dev.yml up --build -d`, which
+starts three containers together — PostgreSQL, the Node backend, and the Python RabbitMQ consumer
+(see "Docker" below for what each one does and how they're wired). The `--env-file .env.dev` flag
+is required, not optional: the `postgres` service's `POSTGRES_USER`/`POSTGRES_PASSWORD`/
+`POSTGRES_DB` are Compose-level `${...}` variable interpolation, resolved from the environment
+Compose itself runs in — a service-level `env_file:` only injects variables into that one
+container at runtime, **after** Compose has already needed those values to render the file. Without
+`--env-file .env.dev`, those three variables resolve to empty strings and Postgres starts
+misconfigured.
+
+| Task | Command |
+|---|---|
+| Start everything (build + detached) | `npm run dev:all` |
+| Stop everything (keeps the database volume) | `npm run dev:down` |
+| Follow logs from all three containers | `npm run dev:logs` |
+| Restart all three containers | `npm run dev:restart` |
+| Restart only the Python consumer (e.g. after editing its code) | `npm run dev:restart:python` |
+
+Node's HTTP server hot-reloads automatically on save (`ts-node-dev --poll`, already the existing
+behavior — see "Development Compose" below). The Python consumer does not auto-restart on save;
+run `npm run dev:restart:python` after editing it — see
+`python-rule-service/README.md`'s "Docker development hot reload" section for why that's a
+deliberate choice, not a gap.
+
+**Rebuilding after a dependency change** (`package.json`/`requirements.txt` edited):
+```bash
+npm run dev:all   # --build is already part of this script; it rebuilds changed images
+```
+
+**Resetting the local PostgreSQL volume** (only when you intentionally want to wipe local dev
+data — e.g. to test migrations from scratch):
+```bash
+npm run dev:down
+docker volume rm firewall-romisinizkey_postgres_data_dev
+npm run dev:all
+```
+There is no `-v` shortcut wired into any npm script on purpose — deleting the volume is
+destructive and irreversible, and should always be a deliberate, explicit step (see the
+"Docker cleanup" warning below for the same reasoning applied to `down -v`).
+
+**Optional fallback — running without Docker:** each service can still run natively, against a
+locally installed (or otherwise reachable) PostgreSQL. See "Running Without Docker" below for the
+full workflow — it is not the primary workflow described in this README, but it is a complete,
+independently usable one, for debugging, learning, or environments where Docker Desktop itself is
+unavailable.
+
+## How Docker Development Works
+
+`npm run dev:all` is Docker Compose managing three separate containers, each running one part of
+the system:
+
+```
+Docker Compose (docker-compose.dev.yml)
+│
+├── postgres           PostgreSQL 16 — the shared database
+│
+├── backend             Node.js / TypeScript API (this repo's root)
+│
+└── python-consumer     Python RabbitMQ consumer (python-rule-service/)
+```
+
+- **Each service runs in its own container**, built from its own image (`Dockerfile` at the repo
+  root for `backend`, `python-rule-service/Dockerfile` for `python-consumer`) — they don't share a
+  filesystem, a process, or a `node_modules`/`site-packages` directory.
+- **Compose creates one internal network** (`firewall-romisinizkey_default`) that all three
+  containers join automatically. Containers on this network reach each other by **service name**,
+  not by IP or `localhost`.
+- **Inside the network, PostgreSQL is reached as `postgres:5432`, never `localhost:5432`.** This is
+  the single most common point of confusion switching between Docker and manual workflows:
+  `localhost` inside a container always refers to *that container itself*, not the host machine or
+  any other container. `backend` and `python-consumer` are both configured (via `.env.dev` /
+  `python-rule-service/.env.dev`) to connect to `postgres`, the Compose service name — not
+  `localhost`, and not `host.docker.internal`.
+- **PostgreSQL's port is also published to the host** (`"5432:5432"` in `docker-compose.dev.yml`),
+  purely for convenience — so a GUI tool like DBeaver, running directly on your Windows machine
+  (outside any container), can connect using:
+  ```
+  Host: localhost
+  Port: 5432
+  ```
+  This publishing is a deliberate development-only convenience — `docker-compose.prod.yml`
+  intentionally does not publish this port (see "Docker" below).
+- **The Node API is reachable at `http://localhost:3000`** from the host, the same way — `"3000:3000"`
+  is published for `backend`.
+- **RabbitMQ is not a container in this Compose file, in development or otherwise.** Both `backend`
+  and `python-consumer` connect out to the same hosted [CloudAMQP](https://www.cloudamqp.com/)
+  instance over the internet, using the `CLOUDAMQP_URL` in each service's own `.env.dev` file —
+  there is nothing to publish or reach by service name for RabbitMQ, since it isn't local at all.
+- **PostgreSQL data persists in a named volume** (`postgres_data_dev`) that survives `npm run
+  dev:down`, container recreation, and image rebuilds — see "Data persistence and volumes" below.
+
+## Running Without Docker
+
+A complete, independently usable manual workflow — useful for debugging, learning what each
+service actually needs to run, or on a machine where Docker Desktop isn't available. **Docker
+(`npm run dev:all`) remains the recommended day-to-day workflow** — this section documents the
+alternative, not a replacement.
+
+Without Docker, you are responsible for starting and configuring PostgreSQL, the Node backend, and
+the Python consumer **separately**, each in its own terminal. Unlike the Docker workflow, every
+service here talks to PostgreSQL via `localhost` (not the Compose service name `postgres`), since
+nothing is containerized and everything runs directly on the host.
+
+### PostgreSQL without Docker
+
+A PostgreSQL server must already be available — installed locally, or otherwise reachable over the
+network. Create the development database once (see "PostgreSQL and Drizzle setup" above for the
+full walkthrough, including the optional test database):
+
+```sql
+CREATE DATABASE firewall_dev;
+```
+
+Both Node's `.env` and Python's `.env` (see below — **not** `.env.dev`, which is Docker-only) need
+matching connection details:
+
+| | Value used in `.env.example` / `python-rule-service/.env.example` |
+|---|---|
+| Host | `localhost` |
+| Port | `5432` |
+| Database | `firewall_dev` |
+| User | `postgres` |
+| Password | *(yours — never committed)* |
+
+DBeaver (or any GUI client) connects the same way: `Host: localhost`, `Port: 5432`.
+
+### Node without Docker
+
+```bash
+cp .env.example .env   # first time only, then fill in real local DB/CloudAMQP values
+npm install
+npm run db:migrate
+npm run dev
+```
+
+`src/main/server.ts`, `src/main/migrate.ts`, and `drizzle.config.ts` each load `.env` automatically
+via `dotenv/config` — no `--env-file` flag or manual export is needed, and this is the **plain**
+`.env`, not `.env.dev` (which only the Docker workflow reads, and only via Compose's `--env-file`).
+`DB_HOST` in this `.env` is `localhost`, not `postgres` — see "How Docker Development Works" above
+for why those differ. `npm run dev` uses native file watching (no `--poll`) since there is no
+Docker Desktop bind mount to work around — see "Development Compose" below for the Docker-specific
+reasoning behind `dev:docker`. This starts Node only: `POST /api/firewall/ips` will accept requests
+and return `202`, but nothing persists until the Python consumer (below) is also running.
+
+### Python without Docker
+
+```bash
+cd python-rule-service
+py -3.13 -m venv .venv        # Windows
+.venv\Scripts\activate        # Windows
+# python3.11+ -m venv .venv   # Linux/WSL/macOS
+# source .venv/bin/activate   # Linux/WSL/macOS
+
+pip install -r requirements.txt
+cp .env.example .env          # first time only, then fill in real local DB/CloudAMQP values
+python -m src.main
+```
+
+`python-rule-service/src/main/config.py` loads `.env` (this service's own, plain `.env` — never
+`.env.dev`) by default. `DATABASE_URI` in this `.env` must use `localhost`, not `postgres` — the
+same reasoning as Node's `DB_HOST` above: `postgres` is a Docker Compose service name, meaningless
+outside a Compose network. `python -m src.main` stays running, consuming messages, until stopped
+with `Ctrl+C`.
+
+> [!NOTE]
+> **Windows note:** running the Python consumer directly on Windows (outside Docker or WSL) has
+> previously failed on this project because Windows Application Control blocked `psycopg`'s
+> compiled binary DLL (`psycopg[binary]`'s manylinux wheel is Linux-only in the first place, and
+> the Windows-native fallback build hit the same block) — the process could not open a database
+> connection at all. This is why Docker is the recommended path for this service specifically: the
+> `python-rule-service/Dockerfile` always runs Python on Linux, regardless of host OS, so this
+> class of problem cannot occur. If Docker is genuinely unavailable, **WSL** (a real Linux
+> environment) is the tested manual fallback — native Windows Python is not guaranteed to work for
+> this service.
+
+### RabbitMQ without Docker
+
+No change from the Docker workflow: RabbitMQ is never local, in either case. Both Node's `.env`
+and Python's `.env` must point `CLOUDAMQP_URL` (and the matching `RABBITMQ_EXCHANGE`/
+`RABBITMQ_QUEUE`/`RABBITMQ_ROUTING_PREFIX`) at the **same** real, hosted CloudAMQP instance — see
+"Required environment variables" below. No local RabbitMQ server or container is ever required or
+supported by this project.
+
+### Manual startup order
+
+Three terminals, started in this order (each later step depends on the one before it being ready):
+
+1. **PostgreSQL** — already running and reachable at `localhost:5432` (see above).
+2. **Terminal 1 — migrations, once**: `npm run db:migrate` (repo root) — applies any pending schema
+   changes; safe to re-run, a no-op if nothing changed.
+3. **Terminal 1 — Node backend**: `npm run dev` (repo root) — waits for its own PostgreSQL and
+   RabbitMQ connections before serving traffic (see "Server startup and graceful shutdown" above).
+4. **Terminal 2 — Python consumer**: `cd python-rule-service && python -m src.main` (inside its
+   activated `.venv`) — connects to CloudAMQP and starts consuming immediately.
+5. **Send requests** — e.g. `POST /api/firewall/ips` to `http://localhost:3000` (see "Manual API
+   testing" below); confirm the resulting row lands in PostgreSQL the same way as the Docker
+   workflow's "End-to-end verification procedure" above.
+
+**Docker (`npm run dev:all`) is the recommended day-to-day workflow.** This manual workflow is for
+debugging, learning, or environments where Docker cannot be used.
+
 ## Current features
 
 - Add IP, domain, and port rules, each tagged as `blacklist` or `whitelist`.
@@ -356,18 +598,15 @@ own.
 
 ### Running both services
 
-```bash
-# Terminal 1 — Node.js (repo root)
-npm run dev
+The primary workflow is Docker Compose — `npm run dev:all` from the repo root starts PostgreSQL,
+Node, and the Python consumer together in one command; see "New Computer Setup", "Daily
+Development", and "How Docker Development Works" above, and "Docker" below for the full picture.
 
-# Terminal 2 — Python consumer (python-rule-service/)
-cd python-rule-service
-python -m src.main
-```
-
-Both require PostgreSQL to already be running and reachable, and both require their own `.env` to
-be configured with real CloudAMQP credentials (never committed — see `.env.example` /
-`python-rule-service/.env.example` for the placeholder templates). The Python process is
+Both services can also run natively, each in its own terminal, against a locally installed
+PostgreSQL — see "Running Without Docker" above ("Manual startup order") for the full,
+step-by-step non-Docker workflow. In both cases, Node and Python each need their own `.env`
+configured with real CloudAMQP credentials (never committed — see `.env.example` /
+`python-rule-service/.env.example` for the placeholder templates); the Python process is
 long-lived — it stays running, consuming messages, until stopped with `Ctrl+C` (graceful shutdown,
 closing the RabbitMQ connection cleanly).
 
@@ -657,11 +896,14 @@ but nothing will persist the resulting rule to PostgreSQL unless the Python cons
 
 ## Docker
 
-The backend has a multi-stage `Dockerfile` with three targets. No database credentials are
-baked into the image at any stage — they're supplied at container-start time via the env files
-below, and via Compose (development: this section; production: Issue #45). **There is no frontend
-container** — no frontend exists in this repository yet, so it stays explicitly out of scope here;
-only the backend and PostgreSQL are Dockerized.
+The Node backend has a multi-stage `Dockerfile` with three targets (below); the Python consumer
+(`python-rule-service/Dockerfile`) has its own single `development` stage, used only by
+`docker-compose.dev.yml` — it has no production Compose entry, since `docker-compose.prod.yml` is
+unaffected by the Docker development workflow described here (see "New Computer Setup"/"Daily
+Development" above). No database or CloudAMQP credentials are baked into either image at any
+stage — they're supplied at container-start time via the env files below, and via Compose
+(development: this section; production: Issue #45, Node backend only). **There is no frontend
+container** — no frontend exists in this repository yet, so it stays explicitly out of scope here.
 
 ### Docker prerequisites
 
@@ -724,13 +966,30 @@ not by this app) equal to the matching `DB_USER`/`DB_PASSWORD`/`DB_NAME`, so the
 database container are configured from one source of truth. The existing `.env.example` is
 unaffected and still describes the plain, non-Docker `npm run dev` workflow (`DB_HOST=localhost`).
 
-### Development Compose
-
-`docker-compose.dev.yml` runs the backend and PostgreSQL together with one command — hot reload,
-migrations-before-server, a persistent database volume, and port 5432 published for DBeaver:
+The Python consumer has its own, separate pair — `python-rule-service/.env.dev.example`
+(committed template) and `python-rule-service/.env.dev` (gitignored, created locally):
 
 ```bash
-cp .env.dev.example .env.dev   # first time only
+cp python-rule-service/.env.dev.example python-rule-service/.env.dev
+```
+
+This is **not** a duplicate of the root `.env.dev` — see "Required environment variables" above:
+the two services are always configured independently, never from a shared `.env` file, Docker
+included. `python-rule-service/.env.dev`'s `DATABASE_URI` embeds the same `postgres`-service-name
+host and the same credentials as the root `.env.dev`'s `POSTGRES_*` values, and its own
+`CLOUDAMQP_URL` must be filled in with the same real CloudAMQP connection string used in the root
+`.env.dev` — the two services publish to and consume from the same broker.
+
+### Development Compose
+
+`docker-compose.dev.yml` runs PostgreSQL, the Node backend, and the Python RabbitMQ consumer
+together with one command — hot reload (Node only — see below), migrations-before-server, a
+persistent database volume, and port 5432 published for DBeaver. This is also exactly what
+`npm run dev:all` (see "Daily Development" above) runs under the hood:
+
+```bash
+cp .env.dev.example .env.dev                                  # first time only
+cp python-rule-service/.env.dev.example python-rule-service/.env.dev   # first time only
 
 docker compose --env-file .env.dev -f docker-compose.dev.yml up --build -d   # build + start
 docker compose --env-file .env.dev -f docker-compose.dev.yml logs -f backend # follow logs
@@ -738,14 +997,33 @@ docker compose --env-file .env.dev -f docker-compose.dev.yml restart backend # r
 docker compose --env-file .env.dev -f docker-compose.dev.yml down            # stop; keeps the DB volume
 ```
 
-`postgres` has a `pg_isready` healthcheck; `backend` waits for it via
+`--env-file .env.dev` is required on every command above, not just `up` — `postgres`'s
+`POSTGRES_USER`/`POSTGRES_PASSWORD`/`POSTGRES_DB` are Compose-level `${...}` variable
+interpolation inside `docker-compose.dev.yml` itself, resolved from the environment Compose runs
+in. A service-level `env_file:` (used by `backend` and `python-consumer` below) only injects
+variables into that one container at container-start time — too late to affect how Compose
+already rendered the file's `${POSTGRES_*}` references. Omitting `--env-file .env.dev` silently
+starts Postgres with empty user/password/database values instead of failing loudly.
+
+`postgres` has a `pg_isready` healthcheck; both `backend` and `python-consumer` wait for it via
 `depends_on: condition: service_healthy` (not plain `depends_on`, which only waits for the
-container to start, not for PostgreSQL to accept connections). The repository is bind-mounted
+container to start, not for PostgreSQL to accept connections). The Node repository is bind-mounted
 over `/app` for hot reload, with a separate named volume shadowing just `/app/node_modules` so the
 host's `node_modules` never overwrites the image's own. On start, the backend container runs
 `npm run db:migrate:dev` (source-based, via `ts-node` — the `development` Dockerfile stage never
 runs `npm run build`, so the compiled `dist/main/migrate.js` used in production doesn't exist
-here) before handing off to hot reload.
+here) before handing off to hot reload. **Node/Drizzle remains the only schema owner** — the
+Python consumer never runs a migration of any kind, in Docker or otherwise (see
+`python-rule-service/README.md`'s "Schema and migration ownership").
+
+`python-consumer` builds from `python-rule-service` (its own `Dockerfile`, `development` stage),
+loads `python-rule-service/.env.dev` (its own, separate env file — see "Docker environment files"
+above), connects to PostgreSQL via the `postgres` service name (never `localhost`), and connects
+to the same CloudAMQP-hosted RabbitMQ instance the Node backend publishes to — **there is no
+local RabbitMQ container** anywhere in this Compose file, matching the non-Docker workflow. Its
+source is also bind-mounted over `/app`, but it does **not** hot-reload on save — see
+`python-rule-service/README.md`'s "Docker development hot reload" section for why, and use
+`npm run dev:restart:python` after editing it.
 
 Hot reload uses `npm run dev:docker`, **not** plain `npm run dev`, inside this Compose file
 specifically: `ts-node-dev`'s file watcher (`chokidar`) only receives native filesystem change

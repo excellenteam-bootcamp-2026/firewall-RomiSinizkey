@@ -1,0 +1,28 @@
+# Local virtualenv and bytecode — reinstalled/rebuilt inside the image, and a
+# Windows-built .venv would be the wrong platform for the Linux container anyway.
+.venv
+__pycache__
+**/__pycache__
+*.pyc
+.pytest_cache
+
+# Local environment files and secrets — never baked into an image.
+# (.env.*.example templates are safe placeholders but the image doesn't need
+# them either.)
+.env
+.env.*
+.env.local-backup
+
+# Git metadata
+.git
+.gitignore
+
+# Tests — not needed at runtime; the bind mount still exposes them for running
+# pytest interactively inside the container if ever wanted.
+tests
+
+# Docs and editor/OS artifacts
+README.md
+.vscode
+.idea
+.DS_Store

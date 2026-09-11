@@ -71,6 +71,12 @@ source .venv/bin/activate     # macOS/Linux
 pip install -r requirements.txt
 ```
 
+> [!NOTE]
+> Running this service natively on Windows has previously failed due to Windows Application
+> Control blocking `psycopg`'s binary DLL. Docker (the root `README.md`'s "Running Without Docker"
+> → Windows note) or WSL are the tested working paths on Windows; native Windows Python is not
+> guaranteed to work.
+
 ## Configuration
 
 Copy the placeholder template and fill in real local values - `.env` is gitignored,
@@ -245,6 +251,56 @@ messages from `RABBITMQ_QUEUE` until stopped with `Ctrl+C` (SIGINT) or SIGTERM, 
 logs `service_shutdown_started`/`service_shutdown_complete` and closes the RabbitMQ connection
 gracefully. It no longer exits immediately - see "RabbitMQ consumer (Project 7)" below for the
 full startup-to-shutdown lifecycle.
+
+## Docker development
+
+This service also runs inside the root `docker-compose.dev.yml`, alongside PostgreSQL and the
+Node backend — see the root `README.md`'s "New Computer Setup" and "Daily Development" sections
+for the full workflow (`npm run dev:all` from the repo root starts all three). The relevant
+pieces specific to this service:
+
+- **`Dockerfile`** — a single `development` stage, Linux (`python:3.13-slim`), so
+  `psycopg[binary]`'s manylinux wheel applies the same way on every host OS regardless of whether
+  the host itself is Windows, macOS, or Linux. `pip install -r requirements.txt` runs into the
+  image's system site-packages, not into `/app` — unlike the Node backend's `node_modules`, no
+  shadowing named volume is needed when this directory is bind-mounted over `/app` for
+  development, since installed packages and the bind-mounted source never occupy the same path.
+- **`.env.dev` / `.env.dev.example`** — separate from `.env`/`.env.example` above. `.env.dev` is
+  what the Docker Compose `python-consumer` service's `env_file:` loads; it points `DATABASE_URI`
+  at host `postgres` (the Compose service name) instead of `localhost`, since inside the Compose
+  network `localhost` would resolve to this container itself, not the database container. Copy
+  the template once per clone: `cp .env.dev.example .env.dev`, then fill in the same CloudAMQP
+  credentials used elsewhere.
+
+### Docker development hot reload
+
+Unlike the Node backend (which uses `ts-node-dev --poll` inside Docker — see the root README's
+"Development Compose" section), this service's `python-consumer` container does **not** run an
+auto-restart-on-change tool. This was a deliberate choice, not an oversight:
+
+- The underlying problem is the same one the Node backend hit: a file watcher's default,
+  OS-native change events (`chokidar` for Node, `watchdog`'s default `Observer` for Python — both
+  ultimately rely on `inotify` inside the Linux container) are not guaranteed to fire reliably for
+  edits made from the host side of a Docker Desktop bind mount. Node's fix was verified
+  empirically (`--poll` demonstrably fixed it; native watching demonstrably did not).
+- `watchdog`/`watchmedo` could in principle be pointed at a polling observer to get the same
+  fix, but doing so is not a supported first-class flag of the `watchmedo` CLI, and no equivalent
+  verification has been done for this service. Adding an extra dependency (`watchdog`) on the
+  strength of an untested assumption would trade a proven-reliable manual step for a
+  plausible-but-unverified automatic one — the opposite of what a consumer that silently drops
+  messages on a crash should optimize for.
+- Restarting a background consumer is cheap and explicit: no browser tab or open HTTP connection
+  depends on it staying up mid-edit, unlike the Node API. A manual restart after saving a change
+  is a one-line command and impossible to get subtly wrong:
+  ```
+  npm run dev:restart:python
+  ```
+  (equivalently, `docker compose --env-file .env.dev -f docker-compose.dev.yml restart
+  python-consumer` from the repo root).
+
+If this ever becomes a real friction point, the next step would be to add `watchdog`, force its
+`PollingObserver` explicitly (not the CLI default), and verify it against a real Docker Desktop
+bind mount the same way `--poll` was verified for Node — not to add it speculatively.
 
 ## Tests
 

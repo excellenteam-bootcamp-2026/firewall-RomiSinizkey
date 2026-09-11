@@ -15,7 +15,12 @@
     "db:migrate": "drizzle-kit migrate",
     "db:migrate:compiled": "node dist/main/migrate.js",
     "db:migrate:dev": "ts-node src/main/migrate.ts",
-    "start:container": "npm run db:migrate:compiled && node dist/main/server.js"
+    "start:container": "npm run db:migrate:compiled && node dist/main/server.js",
+    "dev:all": "docker compose --env-file .env.dev -f docker-compose.dev.yml up --build -d",
+    "dev:down": "docker compose --env-file .env.dev -f docker-compose.dev.yml down",
+    "dev:logs": "docker compose --env-file .env.dev -f docker-compose.dev.yml logs -f",
+    "dev:restart": "docker compose --env-file .env.dev -f docker-compose.dev.yml restart",
+    "dev:restart:python": "docker compose --env-file .env.dev -f docker-compose.dev.yml restart python-consumer"
   },
   "license": "MIT",
   "dependencies": {
